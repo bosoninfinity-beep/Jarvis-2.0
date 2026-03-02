@@ -2224,7 +2224,9 @@ export class GatewayServer {
         status: johnyState?.status ?? 'offline',
       };
 
-      const setupComplete = sshKeyExists && smith.online && johny.online;
+      // Setup is complete once SSH key has been deployed — don't require agents
+      // to be online (they may still be connecting after app launch)
+      const setupComplete = sshKeyExists;
 
       return { setupComplete, sshKeyExists, smith, johny };
     });
@@ -2585,6 +2587,20 @@ export class GatewayServer {
       }
 
       void this.store.setAgentState(state);
+
+      // Auto-register agent capabilities from AGENT_DEFAULTS on first status
+      const defaults = AGENT_DEFAULTS[state.identity.agentId as keyof typeof AGENT_DEFAULTS];
+      if (defaults) {
+        void this.store.setCapabilities({
+          agentId: state.identity.agentId,
+          machineId: state.identity.machineId ?? 'unknown',
+          capabilities: [...defaults.capabilities],
+          tools: [],
+          models: [],
+          maxConcurrency: 3,
+        });
+      }
+
       // Only broadcast to dashboard if status or activeTask changed (avoid spamming re-renders)
       const prevState = this.agentStates?.get(state.identity.agentId);
       if (!prevState || prevState.status !== state.status || prevState.activeTaskId !== state.activeTaskId) {
@@ -3482,7 +3498,14 @@ export class GatewayServer {
 
       if (hasAllCapabilities) {
         await this.store.updateTask(task.id, { assignedAgent: agent.identity.agentId, status: 'assigned' });
-        await this.nats.publish(NatsSubjects.agentTask(agent.identity.agentId), task);
+        // Send as TaskAssignment format (taskId, not id) expected by agent-runtime
+        const taskAssignment = {
+          taskId: task.id,
+          title: task.title,
+          description: task.description ?? task.title,
+          priority: String(task.priority ?? 'normal'),
+        };
+        await this.nats.publish(NatsSubjects.agentTask(agent.identity.agentId), taskAssignment);
         this.protocol.broadcast('task.assigned', {
           taskId: task.id,
           agentId: agent.identity.agentId,
