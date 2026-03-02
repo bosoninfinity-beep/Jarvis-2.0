@@ -817,7 +817,7 @@ function getLocalResponse(input: string, lang: VoiceLanguage): string {
     if (lower.includes('status') || lower.includes('jak') && lower.includes('system'))
       return 'Wszystko działa, systemy w porządku, oba agenty online.';
     if (lower.includes('agenci') || lower.includes('agent'))
-      return 'Masz dwóch agentów — Alpha robi dev, Beta zajmuje się marketingiem. Oba aktywne.';
+      return 'Masz dwóch agentów — Smith robi dev, Johny zajmuje się marketingiem. Oba aktywne.';
     if (lower.includes('czas') || lower.includes('godzina') || lower.includes('która'))
       return `Jest ${new Date().toLocaleTimeString('pl-PL')}.`;
     if (lower.includes('dzień dobry') || lower.includes('cześć') || lower.includes('hej') || lower.includes('siema') || lower.includes('yo'))
@@ -845,7 +845,7 @@ function getLocalResponse(input: string, lang: VoiceLanguage): string {
   if (lower.includes('status') || (lower.includes('how') && lower.includes('system')))
     return 'Everything\'s running fine, both agents are online.';
   if (lower.includes('agents') || lower.includes('agent'))
-    return 'You\'ve got Alpha on dev and Beta on marketing. Both active.';
+    return 'You\'ve got Smith on dev and Johny on marketing. Both active.';
   if (lower.includes('time'))
     return `It's ${new Date().toLocaleTimeString('en-US')}.`;
   if (lower.includes('hello') || lower.includes('hey') || lower.includes('hi ') || lower === 'hi' || lower.includes('yo'))

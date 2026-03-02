@@ -4,7 +4,7 @@
  * Shows:
  * - Gateway server info
  * - Connected dashboard clients
- * - Agent nodes (Alpha, Beta) with real-time status
+ * - Agent nodes (Smith, Johny) with real-time status
  * - Infrastructure services (NATS, Redis, NAS)
  * - Network topology visualization
  */

@@ -417,31 +417,31 @@ export class GatewayServer {
     this.app.get('/api/vnc', (_req, res) => {
       // Prefer Thunderbolt IPs for VNC (10 Gbps = smoother stream)
       const tbEnabled = process.env['THUNDERBOLT_ENABLED'] === 'true';
-      const alphaHost = (tbEnabled && process.env['VNC_ALPHA_HOST_THUNDERBOLT'])
-        ? process.env['VNC_ALPHA_HOST_THUNDERBOLT']
-        : process.env['VNC_ALPHA_HOST'] ?? 'mac-mini-alpha.local';
-      const betaHost = (tbEnabled && process.env['VNC_BETA_HOST_THUNDERBOLT'])
-        ? process.env['VNC_BETA_HOST_THUNDERBOLT']
-        : process.env['VNC_BETA_HOST'] ?? 'mac-mini-beta.local';
+      const smithHost = (tbEnabled && process.env['VNC_SMITH_HOST_THUNDERBOLT'])
+        ? process.env['VNC_SMITH_HOST_THUNDERBOLT']
+        : process.env['VNC_SMITH_HOST'] ?? process.env['VNC_ALPHA_HOST'] ?? '192.168.1.37';
+      const johnyHost = (tbEnabled && process.env['VNC_JOHNY_HOST_THUNDERBOLT'])
+        ? process.env['VNC_JOHNY_HOST_THUNDERBOLT']
+        : process.env['VNC_JOHNY_HOST'] ?? process.env['VNC_BETA_HOST'] ?? '192.168.1.32';
 
       // Authenticated endpoint — safe to include credentials
       res.json({
         endpoints: {
-          alpha: {
-            host: alphaHost,
-            port: Number(process.env['VNC_ALPHA_PORT'] ?? 6080),
-            username: process.env['VNC_ALPHA_USERNAME'] ?? '',
-            password: process.env['VNC_ALPHA_PASSWORD'] ?? '',
+          smith: {
+            host: smithHost,
+            port: Number(process.env['VNC_SMITH_PORT'] ?? process.env['VNC_ALPHA_PORT'] ?? 6080),
+            username: process.env['VNC_SMITH_USERNAME'] ?? process.env['VNC_ALPHA_USERNAME'] ?? '',
+            password: process.env['VNC_SMITH_PASSWORD'] ?? process.env['VNC_ALPHA_PASSWORD'] ?? '',
             label: 'Agent Smith (Dev)',
-            thunderbolt: tbEnabled && !!process.env['VNC_ALPHA_HOST_THUNDERBOLT'],
+            thunderbolt: tbEnabled && !!(process.env['VNC_SMITH_HOST_THUNDERBOLT'] ?? process.env['VNC_ALPHA_HOST_THUNDERBOLT']),
           },
-          beta: {
-            host: betaHost,
-            port: Number(process.env['VNC_BETA_PORT'] ?? 6080),
-            username: process.env['VNC_BETA_USERNAME'] ?? '',
-            password: process.env['VNC_BETA_PASSWORD'] ?? '',
-            label: 'Agent John (Marketing)',
-            thunderbolt: tbEnabled && !!process.env['VNC_BETA_HOST_THUNDERBOLT'],
+          johny: {
+            host: johnyHost,
+            port: Number(process.env['VNC_JOHNY_PORT'] ?? process.env['VNC_BETA_PORT'] ?? 6081),
+            username: process.env['VNC_JOHNY_USERNAME'] ?? process.env['VNC_BETA_USERNAME'] ?? '',
+            password: process.env['VNC_JOHNY_PASSWORD'] ?? process.env['VNC_BETA_PASSWORD'] ?? '',
+            label: 'Agent Johny (Marketing)',
+            thunderbolt: tbEnabled && !!(process.env['VNC_JOHNY_HOST_THUNDERBOLT'] ?? process.env['VNC_BETA_HOST_THUNDERBOLT']),
           },
         },
         thunderboltEnabled: tbEnabled,
@@ -451,7 +451,7 @@ export class GatewayServer {
     // ── VNC file transfer: upload file → SCP to remote machine ──────────
     this.app.post('/api/vnc/upload', async (req, res) => {
       try {
-        const target = req.query['target'] as string; // 'alpha' or 'beta'
+        const target = req.query['target'] as string; // 'smith' or 'johny'
         const filename = req.query['filename'] as string;
         if (!target || !filename) {
           res.status(400).json({ error: 'Missing target or filename' });
@@ -462,14 +462,14 @@ export class GatewayServer {
         const sshKey = resolve(process.env['HOME'] ?? '/Users/kamilpadula', '.ssh/id_ed25519_jarvis');
         let sshUser: string;
         let sshHost: string;
-        if (target === 'alpha') {
-          sshHost = process.env['SSH_ALPHA_HOST'] ?? '192.168.1.37';
-          sshUser = process.env['SSH_ALPHA_USER'] ?? 'Agent_Smith';
-        } else if (target === 'beta') {
-          sshHost = process.env['SSH_BETA_HOST'] ?? '192.168.1.32';
-          sshUser = process.env['SSH_BETA_USER'] ?? 'agent_johny';
+        if (target === 'smith') {
+          sshHost = process.env['SMITH_IP'] ?? process.env['ALPHA_IP'] ?? '192.168.1.37';
+          sshUser = process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? 'agent_smith';
+        } else if (target === 'johny') {
+          sshHost = process.env['JOHNY_IP'] ?? process.env['BETA_IP'] ?? '192.168.1.32';
+          sshUser = process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? 'agent_johny';
         } else {
-          res.status(400).json({ error: 'Invalid target (use alpha or beta)' });
+          res.status(400).json({ error: 'Invalid target (use smith or johny)' });
           return;
         }
 
@@ -532,14 +532,14 @@ export class GatewayServer {
         const sshKey = resolve(process.env['HOME'] ?? '/Users/kamilpadula', '.ssh/id_ed25519_jarvis');
         let sshUser: string;
         let sshHost: string;
-        if (target === 'alpha') {
-          sshHost = process.env['SSH_ALPHA_HOST'] ?? '192.168.1.37';
-          sshUser = process.env['SSH_ALPHA_USER'] ?? 'Agent_Smith';
-        } else if (target === 'beta') {
-          sshHost = process.env['SSH_BETA_HOST'] ?? '192.168.1.32';
-          sshUser = process.env['SSH_BETA_USER'] ?? 'agent_johny';
+        if (target === 'smith') {
+          sshHost = process.env['SMITH_IP'] ?? process.env['ALPHA_IP'] ?? '192.168.1.37';
+          sshUser = process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? 'agent_smith';
+        } else if (target === 'johny') {
+          sshHost = process.env['JOHNY_IP'] ?? process.env['BETA_IP'] ?? '192.168.1.32';
+          sshUser = process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? 'agent_johny';
         } else {
-          res.status(400).json({ error: 'Invalid target' });
+          res.status(400).json({ error: 'Invalid target (use smith or johny)' });
           return;
         }
 
@@ -585,14 +585,14 @@ export class GatewayServer {
         const sshKey = resolve(process.env['HOME'] ?? '/Users/kamilpadula', '.ssh/id_ed25519_jarvis');
         let sshUser: string;
         let sshHost: string;
-        if (target === 'alpha') {
-          sshHost = process.env['SSH_ALPHA_HOST'] ?? '192.168.1.37';
-          sshUser = process.env['SSH_ALPHA_USER'] ?? 'Agent_Smith';
-        } else if (target === 'beta') {
-          sshHost = process.env['SSH_BETA_HOST'] ?? '192.168.1.32';
-          sshUser = process.env['SSH_BETA_USER'] ?? 'agent_johny';
+        if (target === 'smith') {
+          sshHost = process.env['SMITH_IP'] ?? process.env['ALPHA_IP'] ?? '192.168.1.37';
+          sshUser = process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? 'agent_smith';
+        } else if (target === 'johny') {
+          sshHost = process.env['JOHNY_IP'] ?? process.env['BETA_IP'] ?? '192.168.1.32';
+          sshUser = process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? 'agent_johny';
         } else {
-          res.status(400).json({ error: 'Invalid target' });
+          res.status(400).json({ error: 'Invalid target (use smith or johny)' });
           return;
         }
 
@@ -632,8 +632,8 @@ export class GatewayServer {
               },
             },
             agents: {
-              alpha: { ip: process.env['ALPHA_IP'] ?? '', user: process.env['ALPHA_USER'] ?? '', role: 'dev', vnc_port: 6080 },
-              beta: { ip: process.env['BETA_IP'] ?? '', user: process.env['BETA_USER'] ?? '', role: 'marketing', vnc_port: 6080 },
+              smith: { ip: process.env['SMITH_IP'] ?? process.env['ALPHA_IP'] ?? '', user: process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? '', role: 'dev', vnc_port: 6080 },
+              johny: { ip: process.env['JOHNY_IP'] ?? process.env['BETA_IP'] ?? '', user: process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? '', role: 'marketing', vnc_port: 6081 },
             },
             nas: {
               ip: process.env['NAS_IP'] ?? '',
@@ -643,8 +643,8 @@ export class GatewayServer {
             thunderbolt: {
               enabled: process.env['THUNDERBOLT_ENABLED'] === 'true',
               master_ip: process.env['MASTER_IP_THUNDERBOLT'] ?? '',
-              alpha_ip: process.env['ALPHA_IP_THUNDERBOLT'] ?? '',
-              beta_ip: process.env['BETA_IP_THUNDERBOLT'] ?? '',
+              smith_ip: process.env['SMITH_IP_THUNDERBOLT'] ?? process.env['ALPHA_IP_THUNDERBOLT'] ?? '',
+              johny_ip: process.env['JOHNY_IP_THUNDERBOLT'] ?? process.env['BETA_IP_THUNDERBOLT'] ?? '',
               nats_url: process.env['NATS_URL_THUNDERBOLT'] ?? '',
             },
           });
@@ -668,8 +668,8 @@ export class GatewayServer {
 
         if (section === 'agents') {
           const agents = (data.agents ?? {}) as Record<string, Record<string, unknown>>;
-          if (body.alphaIp) { agents.alpha = { ...agents.alpha, ip: body.alphaIp }; }
-          if (body.betaIp) { agents.beta = { ...agents.beta, ip: body.betaIp }; }
+          if (body.smithIp) { agents.smith = { ...agents.smith, ip: body.smithIp }; }
+          if (body.johnyIp) { agents.johny = { ...agents.johny, ip: body.johnyIp }; }
           data.agents = agents;
         } else if (section === 'nas') {
           data.nas = {
@@ -681,8 +681,8 @@ export class GatewayServer {
           data.thunderbolt = {
             enabled: body.enabled ?? false,
             master_ip: body.masterIp ?? '169.254.100.1',
-            alpha_ip: body.alphaIp ?? '169.254.100.2',
-            beta_ip: body.betaIp ?? '169.254.100.3',
+            smith_ip: body.smithIp ?? '169.254.100.2',
+            johny_ip: body.johnyIp ?? '169.254.100.3',
             nats_port: body.natsPort ?? 4223,
           };
         }
@@ -931,21 +931,21 @@ export class GatewayServer {
     this.protocol.registerMethod('vnc.info', async () => {
       const tbEnabled = process.env['THUNDERBOLT_ENABLED'] === 'true';
       return {
-        alpha: {
-          host: (tbEnabled && process.env['VNC_ALPHA_HOST_THUNDERBOLT'])
-            ? process.env['VNC_ALPHA_HOST_THUNDERBOLT']
-            : process.env['VNC_ALPHA_HOST'] ?? 'mac-mini-alpha.local',
-          port: Number(process.env['VNC_ALPHA_PORT'] ?? 6080),
-          label: 'Mac Mini Alpha (Dev)',
-          thunderbolt: tbEnabled && !!process.env['VNC_ALPHA_HOST_THUNDERBOLT'],
+        smith: {
+          host: (tbEnabled && process.env['VNC_SMITH_HOST_THUNDERBOLT'])
+            ? process.env['VNC_SMITH_HOST_THUNDERBOLT']
+            : process.env['VNC_SMITH_HOST'] ?? process.env['VNC_ALPHA_HOST'] ?? '192.168.1.37',
+          port: Number(process.env['VNC_SMITH_PORT'] ?? process.env['VNC_ALPHA_PORT'] ?? 6080),
+          label: 'Agent Smith (Dev)',
+          thunderbolt: tbEnabled && !!(process.env['VNC_SMITH_HOST_THUNDERBOLT'] ?? process.env['VNC_ALPHA_HOST_THUNDERBOLT']),
         },
-        beta: {
-          host: (tbEnabled && process.env['VNC_BETA_HOST_THUNDERBOLT'])
-            ? process.env['VNC_BETA_HOST_THUNDERBOLT']
-            : process.env['VNC_BETA_HOST'] ?? 'mac-mini-beta.local',
-          port: Number(process.env['VNC_BETA_PORT'] ?? 6080),
-          label: 'Mac Mini Beta (Marketing)',
-          thunderbolt: tbEnabled && !!process.env['VNC_BETA_HOST_THUNDERBOLT'],
+        johny: {
+          host: (tbEnabled && process.env['VNC_JOHNY_HOST_THUNDERBOLT'])
+            ? process.env['VNC_JOHNY_HOST_THUNDERBOLT']
+            : process.env['VNC_JOHNY_HOST'] ?? process.env['VNC_BETA_HOST'] ?? '192.168.1.32',
+          port: Number(process.env['VNC_JOHNY_PORT'] ?? process.env['VNC_BETA_PORT'] ?? 6081),
+          label: 'Agent Johny (Marketing)',
+          thunderbolt: tbEnabled && !!(process.env['VNC_JOHNY_HOST_THUNDERBOLT'] ?? process.env['VNC_BETA_HOST_THUNDERBOLT']),
         },
         thunderboltEnabled: tbEnabled,
       };

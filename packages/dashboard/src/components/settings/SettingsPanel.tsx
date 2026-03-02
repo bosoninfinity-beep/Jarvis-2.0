@@ -4,15 +4,15 @@ import { authFetch } from '../../gateway/client.js';
 interface NetworkConfig {
   master: { ip: string; hostname: string; ports: { gateway: number; dashboard: number; nats: number; redis: number } };
   agents: {
-    alpha: { ip: string; user: string; role: string; vnc_port: number };
-    beta: { ip: string; user: string; role: string; vnc_port: number };
+    smith: { ip: string; user: string; role: string; vnc_port: number };
+    johny: { ip: string; user: string; role: string; vnc_port: number };
   };
   nas: { ip: string; share: string; mount: string };
   thunderbolt?: {
     enabled: boolean;
     master_ip: string;
-    alpha_ip: string;
-    beta_ip: string;
+    smith_ip: string;
+    johny_ip: string;
     nats_url: string;
   };
   auth_token: string;
@@ -31,8 +31,8 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
   const [saveMsg, setSaveMsg] = useState('');
 
   // Form states
-  const [alphaIp, setAlphaIp] = useState('');
-  const [betaIp, setBetaIp] = useState('');
+  const [smithIp, setSmithIp] = useState('');
+  const [johnyIp, setJohnyIp] = useState('');
   const [nasIp, setNasIp] = useState('');
   const [nasShare, setNasShare] = useState('');
   const [nasUser, setNasUser] = useState('');
@@ -42,8 +42,8 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
   // Thunderbolt form states
   const [tbEnabled, setTbEnabled] = useState(false);
   const [tbMasterIp, setTbMasterIp] = useState('169.254.100.1');
-  const [tbAlphaIp, setTbAlphaIp] = useState('169.254.100.2');
-  const [tbBetaIp, setTbBetaIp] = useState('169.254.100.3');
+  const [tbSmithIp, setTbSmithIp] = useState('169.254.100.2');
+  const [tbJohnyIp, setTbJohnyIp] = useState('169.254.100.3');
 
   const fetchConfig = useCallback(async () => {
     try {
@@ -52,8 +52,8 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
       if (res.ok) {
         const data = await res.json() as NetworkConfig;
         setConfig(data);
-        setAlphaIp(data.agents?.alpha?.ip ?? '');
-        setBetaIp(data.agents?.beta?.ip ?? '');
+        setSmithIp(data.agents?.smith?.ip ?? '');
+        setJohnyIp(data.agents?.johny?.ip ?? '');
         setNasIp(data.nas?.ip ?? '');
         setNasShare(data.nas?.share ?? '');
         setNasMount(data.nas?.mount ?? '');
@@ -61,8 +61,8 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
         if (data.thunderbolt) {
           setTbEnabled(data.thunderbolt.enabled);
           setTbMasterIp(data.thunderbolt.master_ip || '169.254.100.1');
-          setTbAlphaIp(data.thunderbolt.alpha_ip || '169.254.100.2');
-          setTbBetaIp(data.thunderbolt.beta_ip || '169.254.100.3');
+          setTbSmithIp(data.thunderbolt.smith_ip || '169.254.100.2');
+          setTbJohnyIp(data.thunderbolt.johny_ip || '169.254.100.3');
         }
       }
     } catch {
@@ -223,13 +223,13 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
                   <InfoRow label="Redis Port" value={String(config?.master?.ports?.redis ?? 6379)} />
 
                   <SectionTitle style={{ marginTop: 20 }}>Adresy agentow</SectionTitle>
-                  <FormRow label="Alpha IP" value={alphaIp} onChange={setAlphaIp} placeholder="192.168.1.x lub hostname" />
-                  <FormRow label="Beta IP" value={betaIp} onChange={setBetaIp} placeholder="192.168.1.x lub hostname" />
+                  <FormRow label="Smith IP" value={smithIp} onChange={setSmithIp} placeholder="192.168.1.x lub hostname" />
+                  <FormRow label="Johny IP" value={johnyIp} onChange={setJohnyIp} placeholder="192.168.1.x lub hostname" />
 
                   <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
                     <button
                       className="primary"
-                      onClick={() => void handleSave('agents', { alphaIp, betaIp })}
+                      onClick={() => void handleSave('agents', { smithIp, johnyIp })}
                       style={{ fontSize: 11, padding: '6px 16px' }}
                     >
                       ZAPISZ
@@ -289,25 +289,25 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
 
               {activeTab === 'agents' && (
                 <div>
-                  <SectionTitle>Mac Mini Alpha (Developer)</SectionTitle>
-                  <InfoRow label="IP" value={config?.agents?.alpha?.ip || 'Nie skonfigurowany'} />
+                  <SectionTitle>Agent Smith (Developer)</SectionTitle>
+                  <InfoRow label="IP" value={config?.agents?.smith?.ip || 'Nie skonfigurowany'} />
                   <InfoRow label="Rola" value="Developer - kod, React Native, deploy, DevOps" />
-                  <InfoRow label="VNC Port" value={String(config?.agents?.alpha?.vnc_port ?? 6080)} />
+                  <InfoRow label="VNC Port" value={String(config?.agents?.smith?.vnc_port ?? 6080)} />
 
-                  <SectionTitle style={{ marginTop: 20 }}>Mac Mini Beta (Marketing)</SectionTitle>
-                  <InfoRow label="IP" value={config?.agents?.beta?.ip || 'Nie skonfigurowany'} />
+                  <SectionTitle style={{ marginTop: 20 }}>Agent Johny (Marketing)</SectionTitle>
+                  <InfoRow label="IP" value={config?.agents?.johny?.ip || 'Nie skonfigurowany'} />
                   <InfoRow label="Rola" value="Marketing - social media, research, content" />
-                  <InfoRow label="VNC Port" value={String(config?.agents?.beta?.vnc_port ?? 6080)} />
+                  <InfoRow label="VNC Port" value={String(config?.agents?.johny?.vnc_port ?? 6081)} />
 
                   <div style={{ marginTop: 20, display: 'flex', gap: 8 }}>
                     <button
-                      onClick={() => void handleSave('deploy_alpha', {})}
+                      onClick={() => void handleSave('deploy_smith', {})}
                       style={{ fontSize: 11, padding: '6px 16px' }}
                     >
                       DEPLOY SMITH
                     </button>
                     <button
-                      onClick={() => void handleSave('deploy_beta', {})}
+                      onClick={() => void handleSave('deploy_johny', {})}
                       style={{ fontSize: 11, padding: '6px 16px' }}
                     >
                       DEPLOY JOHNY
@@ -381,8 +381,8 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
 
                   <SectionTitle style={{ marginTop: 8 }}>Adresy IP Thunderbolt Bridge</SectionTitle>
                   <FormRow label="Master IP" value={tbMasterIp} onChange={setTbMasterIp} placeholder="169.254.100.1" />
-                  <FormRow label="Alpha IP" value={tbAlphaIp} onChange={setTbAlphaIp} placeholder="169.254.100.2" />
-                  <FormRow label="Beta IP" value={tbBetaIp} onChange={setTbBetaIp} placeholder="169.254.100.3" />
+                  <FormRow label="Smith IP" value={tbSmithIp} onChange={setTbSmithIp} placeholder="169.254.100.2" />
+                  <FormRow label="Johny IP" value={tbJohnyIp} onChange={setTbJohnyIp} placeholder="169.254.100.3" />
 
                   <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
                     <button
@@ -390,8 +390,8 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
                       onClick={() => void handleSave('thunderbolt', {
                         enabled: tbEnabled,
                         masterIp: tbMasterIp,
-                        alphaIp: tbAlphaIp,
-                        betaIp: tbBetaIp,
+                        smithIp: tbSmithIp,
+                        johnyIp: tbJohnyIp,
                         natsPort: '4223',
                       })}
                       style={{ fontSize: 11, padding: '6px 16px' }}

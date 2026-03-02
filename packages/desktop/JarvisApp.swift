@@ -189,10 +189,10 @@ class ServiceManager {
         startOrchestrator(envContent: envContent)
 
         // Start remote agents via SSH → launchctl (LaunchAgents with KeepAlive=true)
-        let smithHost = envValue("ALPHA_IP", from: envContent)
-        let smithUser = envValue("ALPHA_USER", from: envContent)
-        let johnyHost = envValue("BETA_IP", from: envContent)
-        let johnyUser = envValue("BETA_USER", from: envContent)
+        let smithHost = envValue("SMITH_IP", from: envContent).isEmpty ? envValue("ALPHA_IP", from: envContent) : envValue("SMITH_IP", from: envContent)
+        let smithUser = envValue("SMITH_USER", from: envContent).isEmpty ? envValue("ALPHA_USER", from: envContent) : envValue("SMITH_USER", from: envContent)
+        let johnyHost = envValue("JOHNY_IP", from: envContent).isEmpty ? envValue("BETA_IP", from: envContent) : envValue("JOHNY_IP", from: envContent)
+        let johnyUser = envValue("JOHNY_USER", from: envContent).isEmpty ? envValue("BETA_USER", from: envContent) : envValue("JOHNY_USER", from: envContent)
 
         startRemoteAgent(name: "smith", host: smithHost, user: smithUser, agentId: "agent-smith")
         startRemoteAgent(name: "johny", host: johnyHost, user: johnyUser, agentId: "agent-johny")
@@ -206,10 +206,10 @@ class ServiceManager {
         // Stop remote agents via SSH → launchctl bootout
         let envPath = "\(dataDir)/jarvis.env"
         let envContent = (try? String(contentsOfFile: envPath, encoding: .utf8)) ?? ""
-        let smithHost = envValue("ALPHA_IP", from: envContent)
-        let smithUser = envValue("ALPHA_USER", from: envContent)
-        let johnyHost = envValue("BETA_IP", from: envContent)
-        let johnyUser = envValue("BETA_USER", from: envContent)
+        let smithHost = envValue("SMITH_IP", from: envContent).isEmpty ? envValue("ALPHA_IP", from: envContent) : envValue("SMITH_IP", from: envContent)
+        let smithUser = envValue("SMITH_USER", from: envContent).isEmpty ? envValue("ALPHA_USER", from: envContent) : envValue("SMITH_USER", from: envContent)
+        let johnyHost = envValue("JOHNY_IP", from: envContent).isEmpty ? envValue("BETA_IP", from: envContent) : envValue("JOHNY_IP", from: envContent)
+        let johnyUser = envValue("JOHNY_USER", from: envContent).isEmpty ? envValue("BETA_USER", from: envContent) : envValue("JOHNY_USER", from: envContent)
 
         if !smithHost.isEmpty && !smithUser.isEmpty {
             runSSHCommand(host: smithHost, user: smithUser, command:

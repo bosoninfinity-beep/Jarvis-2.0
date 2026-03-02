@@ -23,8 +23,8 @@ interface ConfigData {
   thunderbolt?: {
     enabled: boolean;
     master_ip: string;
-    alpha_ip: string;
-    beta_ip: string;
+    smith_ip: string;
+    johny_ip: string;
     nats_url?: string;
     nats_port?: number;
   };
@@ -267,8 +267,8 @@ export function ConfigView() {
               />
             </div>
             <ConfigField label="Master IP" value={editedConfig.thunderbolt?.master_ip ?? ''} onChange={(v) => updateField('thunderbolt', 'master_ip', v)} />
-            <ConfigField label="Alpha IP" value={editedConfig.thunderbolt?.alpha_ip ?? ''} onChange={(v) => updateField('thunderbolt', 'alpha_ip', v)} />
-            <ConfigField label="Beta IP" value={editedConfig.thunderbolt?.beta_ip ?? ''} onChange={(v) => updateField('thunderbolt', 'beta_ip', v)} />
+            <ConfigField label="Smith IP" value={editedConfig.thunderbolt?.smith_ip ?? ''} onChange={(v) => updateField('thunderbolt', 'smith_ip', v)} />
+            <ConfigField label="Johny IP" value={editedConfig.thunderbolt?.johny_ip ?? ''} onChange={(v) => updateField('thunderbolt', 'johny_ip', v)} />
           </ConfigSection>
         </div>
       )}

@@ -17,8 +17,8 @@ interface VNCEndpoint {
 type VNCStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 const DEFAULT_ENDPOINTS: VNCEndpoint[] = [
-  { id: 'alpha', label: 'AGENT SMITH // DEV', host: '192.168.1.37', port: 6080, enabled: true },
-  { id: 'beta', label: 'AGENT JOHNY // OPS', host: 'mac-mini-beta.local', port: 6081, enabled: false },
+  { id: 'smith', label: 'AGENT SMITH // DEV', host: '192.168.1.37', port: 6080, enabled: true },
+  { id: 'johny', label: 'AGENT JOHNY // MARKETING', host: '192.168.1.32', port: 6081, enabled: false },
 ];
 
 export function VNCGrid() {
@@ -44,31 +44,30 @@ export function VNCGrid() {
             thunderboltEnabled?: boolean;
           };
           const fetched: VNCEndpoint[] = [];
-          if (data.endpoints.alpha) {
+          if (data.endpoints.smith) {
             fetched.push({
-              id: 'alpha',
+              id: 'smith',
               label: 'AGENT SMITH // DEV',
-              host: data.endpoints.alpha.host,
-              port: data.endpoints.alpha.port,
-              username: data.endpoints.alpha.username || undefined,
-              password: data.endpoints.alpha.password || undefined,
-              thunderbolt: data.endpoints.alpha.thunderbolt,
-              enabled: true, // Alpha is always enabled
+              host: data.endpoints.smith.host,
+              port: data.endpoints.smith.port,
+              username: data.endpoints.smith.username || undefined,
+              password: data.endpoints.smith.password || undefined,
+              thunderbolt: data.endpoints.smith.thunderbolt,
+              enabled: true,
             });
           }
-          if (data.endpoints.beta) {
-            // Beta only enabled if host is not localhost (means it's configured)
-            const betaHost = data.endpoints.beta.host;
-            const betaConfigured = betaHost !== 'localhost' && betaHost !== '127.0.0.1' && betaHost !== 'mac-mini-beta.local';
+          if (data.endpoints.johny) {
+            const johnyHost = data.endpoints.johny.host;
+            const johnyConfigured = johnyHost !== 'localhost' && johnyHost !== '127.0.0.1' && johnyHost !== 'mac-mini-johny.local';
             fetched.push({
-              id: 'beta',
-              label: 'AGENT JOHNY // OPS',
-              host: betaHost,
-              port: data.endpoints.beta.port,
-              username: data.endpoints.beta.username || undefined,
-              password: data.endpoints.beta.password || undefined,
-              thunderbolt: data.endpoints.beta.thunderbolt,
-              enabled: betaConfigured,
+              id: 'johny',
+              label: 'AGENT JOHNY // MARKETING',
+              host: johnyHost,
+              port: data.endpoints.johny.port,
+              username: data.endpoints.johny.username || undefined,
+              password: data.endpoints.johny.password || undefined,
+              thunderbolt: data.endpoints.johny.thunderbolt,
+              enabled: johnyConfigured,
             });
           }
           if (fetched.length > 0) setEndpoints(fetched);
@@ -238,7 +237,7 @@ export function VNCGrid() {
                   fontFamily: 'var(--font-display)',
                   fontSize: 9,
                   letterSpacing: 1.5,
-                  color: ep.id === 'alpha' ? 'var(--cyan-bright)' : 'var(--purple)',
+                  color: ep.id === 'smith' ? 'var(--cyan-bright)' : 'var(--purple)',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',

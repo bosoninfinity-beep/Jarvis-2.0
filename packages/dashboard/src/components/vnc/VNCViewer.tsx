@@ -10,7 +10,7 @@ interface VNCViewerProps {
   host: string;
   port: number;
   id: string;
-  /** 'alpha' | 'beta' — used for file transfer & clipboard SSH target */
+  /** 'smith' | 'johny' — used for file transfer & clipboard SSH target */
   target: string;
   username?: string;
   password?: string;

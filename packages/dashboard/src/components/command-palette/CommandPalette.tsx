@@ -61,7 +61,7 @@ export function CommandPalette() {
     { id: 'nav-env', label: 'Environment', description: 'Environment variables', icon: Variable, category: 'navigate', action: () => navigate('/environment'), keywords: ['env', 'vars', 'config'] },
     { id: 'nav-config', label: 'Config', description: 'Gateway configuration', icon: Settings, category: 'navigate', action: () => navigate('/config'), keywords: ['settings'] },
     { id: 'nav-voice', label: 'Voice', description: 'Voice interface — talk to Jarvis', icon: AudioWaveform, category: 'navigate', action: () => navigate('/voice'), keywords: ['speech', 'microphone', 'talk', 'speak', 'tts', 'stt'] },
-    { id: 'nav-agents', label: 'Agents', description: 'Agent fleet management', icon: Bot, category: 'navigate', action: () => navigate('/agents'), keywords: ['alpha', 'beta', 'fleet'] },
+    { id: 'nav-agents', label: 'Agents', description: 'Agent fleet management', icon: Bot, category: 'navigate', action: () => navigate('/agents'), keywords: ['smith', 'johny', 'fleet'] },
     { id: 'nav-plugins', label: 'Plugins', description: 'Plugin registry', icon: Package, category: 'navigate', action: () => navigate('/plugins'), keywords: ['extensions', 'modules'] },
     { id: 'nav-files', label: 'Files', description: 'NAS file manager', icon: Settings, category: 'navigate', action: () => navigate('/files'), keywords: ['nas', 'browse', 'storage', 'disk'] },
     { id: 'nav-debug', label: 'Debug', description: 'Debug tools & RPC caller', icon: Bug, category: 'navigate', action: () => navigate('/debug'), keywords: ['rpc', 'events', 'inspect'] },
