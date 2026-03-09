@@ -235,15 +235,23 @@ export class ExecTool implements AgentTool {
 
     // Security mode checks
     if (this.security.mode === 'deny') {
-      // Check if command uses a safe bin
+      // In deny mode, block any command chaining (pipes/semicolons/&&/||) and only allow safe bins
+      if (/[;&|`$()]/.test(command)) {
+        return createErrorResult('Exec security mode is \'deny\'. Command chaining (;, &, |, etc.) is not allowed.');
+      }
       const bin = command.trim().split(/\s+/)[0] ?? '';
       if (!this.isSafeBin(bin)) {
         return createErrorResult(`Exec security mode is 'deny'. Only safe bins are allowed: ${this.security.safeBins?.join(', ')}`);
       }
     } else if (this.security.mode === 'allowlist') {
+      // In allowlist mode, also check for command chaining that could bypass the allowlist
+      const hasChaining = /[;&`]|\|\||\$\(/.test(command);
       const bin = command.trim().split(/\s+/)[0] ?? '';
       const isAllowed = this.security.allowlist?.some(pattern => new RegExp(pattern).test(command)) ?? false;
       const isSafe = this.isSafeBin(bin);
+      if (hasChaining && !isAllowed) {
+        return createErrorResult('Command chaining detected. In allowlist mode, chained commands must match an allowlist pattern.');
+      }
       if (!isAllowed && !isSafe) {
         return createErrorResult(`Command not in allowlist. Add to exec security allowlist or use a safe bin.`);
       }

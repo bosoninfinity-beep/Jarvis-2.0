@@ -783,8 +783,18 @@ export class NatsHandler {
       log.info('Disconnected from NATS');
     }
 
-    // Wait for subscription loops to finish
-    await Promise.allSettled(this.subscriptionLoops);
+    // Wait for subscription loops to finish (with timeout to prevent hanging)
+    if (this.subscriptionLoops.length > 0) {
+      const SUB_CLEANUP_TIMEOUT = 5_000;
+      try {
+        await Promise.race([
+          Promise.allSettled(this.subscriptionLoops),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Subscription cleanup timeout')), SUB_CLEANUP_TIMEOUT)),
+        ]);
+      } catch {
+        log.warn(`Subscription loops did not finish within ${SUB_CLEANUP_TIMEOUT}ms — forcing cleanup`);
+      }
+    }
     this.subscriptionLoops = [];
   }
 }

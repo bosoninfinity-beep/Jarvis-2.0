@@ -35,6 +35,7 @@ interface ElementRef {
   text?: string;
 }
 
+const MAX_REF_MAP_SIZE = 500; // LRU cap — prevent unbounded memory growth
 let _refCounter = 0;
 let _refMap = new Map<number, ElementRef>();
 
@@ -290,6 +291,14 @@ export class BrowserTool implements AgentTool {
         _refMap.set(ref.ref, { selector: ref.selector, role: ref.role, name: ref.name });
       }
 
+      // LRU eviction: if too many refs, keep only the most recent
+      if (_refMap.size > MAX_REF_MAP_SIZE) {
+        const keys = [..._refMap.keys()];
+        for (let i = 0; i < keys.length - MAX_REF_MAP_SIZE; i++) {
+          _refMap.delete(keys[i]!);
+        }
+      }
+
       const title = await page.title();
       const url = await page.evaluate('window.location.href');
 
@@ -539,13 +548,14 @@ export class BrowserTool implements AgentTool {
 
     this.tabs.delete(tabId);
 
-    // Verify page is still alive (window.close() does not work in Playwright).
-    // PageInstance has no close() method — the page is removed from tracking;
-    // the underlying browser context will be released when the browser closes.
+    // Close the page's browser context to prevent resource leaks
     try {
-      await page.evaluate(() => {});
+      const ctx = page.context?.();
+      if (ctx && typeof ctx.close === 'function') {
+        await ctx.close();
+      }
     } catch {
-      // Page may already be detached — that's fine
+      // Page/context may already be detached — that's fine
     }
 
     if (tabId === this.activeTabId) {

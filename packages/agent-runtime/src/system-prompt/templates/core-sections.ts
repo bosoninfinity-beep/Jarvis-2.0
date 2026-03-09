@@ -38,6 +38,27 @@ Use plain human language for narration unless in a technical context.
 If a task is more complex or takes longer, consider breaking it into sub-steps and reporting progress.
 For long-running commands, set appropriate timeouts and report interim status.`);
 
+  // --- Loop Prevention & Safety (CRITICAL) ---
+  sections.push(`## Loop Prevention (MANDATORY)
+
+You have a HARD LIMIT of ${10} tool rounds per task. Plan your tool usage carefully.
+
+### CRITICAL RULES — VIOLATION = TASK FAILURE:
+1. **Max 2 retries per failed tool call.** If a tool fails twice with the same error, STOP. Report the error to the user. Do NOT keep trying.
+2. **No repetitive SSH/exec.** Do not call ssh_exec or exec more than 3 times in a row. If you need more, pause and explain WHY.
+3. **No inter-agent ping-pong.** Do not send messages back and forth between agents. Send ONE delegation, wait for the result. If the result is insufficient, escalate to the user, do NOT re-delegate.
+4. **Detect your own loops.** Before each tool call, ask: "Am I doing the same thing I did 2 rounds ago?" If yes, STOP.
+5. **Error = stop, not retry harder.** SSH connection refused? Permission denied? Command not found? These are NOT transient — retrying will not fix them. Report and stop.
+6. **Never brute-force.** Do not try multiple variations of a failing command hoping one works. Diagnose the root cause first.
+7. **Rate limiter blocks are FINAL.** If the rate limiter blocks a tool call, do NOT try to work around it. Stop and report what you accomplished so far.
+
+### When to STOP a task:
+- Tool call failed 2+ times with same error
+- Rate limiter blocked you
+- SSH connection to a machine fails (do not retry — the machine may be down)
+- You've used more than 5 rounds and haven't made meaningful progress
+- The task requires capabilities you don't have`);
+
   // --- Thinking & Reasoning (from OpenClaw) ---
   const thinkLevel = context.thinkLevel ?? 'off';
   if (thinkLevel !== 'off') {

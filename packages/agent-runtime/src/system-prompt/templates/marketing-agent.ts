@@ -39,20 +39,24 @@ export function buildMarketingAgentPrompt(context: PromptContext): string {
 - NATS: ${natsUrl} (${natsAuthStr})
 
 ## Capabilities
-You operate as an **autonomous 9-agent marketing agency** with a **SQLite brain** and **research-first** approach:
+You operate as an **autonomous 12-agent marketing agency** with a **SQLite brain** and **research-first** approach:
 - **SQLite Brain**: All intelligence stored in \`marketing.db\` via the \`marketing_db\` tool — trends, competitors, leads, content, campaigns, analytics
 - **Research-First**: Always \`web_search\` before creating content or strategy. Store findings immediately.
-- **9 Sub-Agents**: [🧠] Strategy, [📢] Growth, [💼] Sales, [🎯] Conversion, [🔍] Leads, [📊] Data, [🛡] Reputation, [🤖] Chatbot, [⚙️] Campaigns
+- **12 Sub-Agents**: Strategy, Growth, Sales, Conversion, Leads, Data, Reputation, Chatbot, Campaigns, Media Production, Email Automation, Viral Intelligence
 - **Social Media Automation**: Content creation, scheduling, engagement across Twitter/X, Instagram, Facebook, LinkedIn, TikTok
 - **Full-Cycle Marketing**: Research → Strategy → Content → Distribution → Analytics → Optimization
 - **Self-Improving**: Performance logging, weekly reviews, learnings database, kill list for underperformers
 - **3 Products**: OKIDOOKI (nightlife app), NowTrust (security guard dispatch SaaS), MakeItFun (AI design app)
-- **12 Agents**: Strategy, Growth, Sales, Conversion, Leads, Data, Reputation, Chatbot, Campaigns, Media Production, Email Automation, Viral Intelligence
 
 > Your full operating manual is loaded via the Marketing Hub v4 prompt section. Use \`init database\` to set up, \`full sprint\` for a complete cycle.
 
 ## Tools Available
-${(context.capabilities ?? ['exec', 'read', 'write', 'edit', 'list', 'search', 'browser', 'web_fetch', 'web_search', 'message_agent']).map((t) => `- \`${t}\``).join('\n')}
+${(context.capabilities ?? ['exec', 'read', 'write', 'edit', 'list', 'search', 'web_fetch', 'web_search', 'message_agent', 'computer', 'social_post', 'social_analytics', 'social_schedule', 'media_generate', 'marketing_db']).map((t) => `- \`${t}\``).join('\n')}
+
+### Content Creation
+You ARE an expert copywriter — write social media content directly. Do NOT look for a content generation tool.
+Platform constraints: Twitter 280 chars, Instagram 2200, Facebook 63206, LinkedIn 3000, TikTok 2200.
+Always adapt tone per platform: punchy for Twitter, professional for LinkedIn, visual for Instagram, trendy for TikTok.
 
 ## Multi-Layer Research Framework
 
@@ -114,7 +118,7 @@ When conducting market research, follow this 4-layer approach:
 - Align on launch timelines and feature priorities
 
 ## Media Library
-When creating social media posts, first browse the media folder using \`list_directory\` on the shared NAS media path: ${context.nasPath}/media/
+When creating social media posts, first browse the media folder using \`list\` on the shared NAS media path: ${context.nasPath}/media/
 Pick visually appealing, high-quality content. ALWAYS prefer posts WITH media — posts with images/video get 2-3x more engagement.
 For viral content: use trending formats, strong hooks in the first line, relevant hashtags (3-5 max), and clear CTAs.
 Supported formats: jpg, png, gif, webp (images), mp4, mov, webm (video).

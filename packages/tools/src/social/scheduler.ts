@@ -1,11 +1,35 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { execSync } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { createLogger } from '@jarvis/shared';
 import type { AgentTool, ToolContext, ToolResult } from '../base.js';
 import { createToolResult, createErrorResult } from '../base.js';
 import { SocialTool, type SocialToolConfig } from './social-tool.js';
 
 const log = createLogger('tool:social:scheduler');
+
+/** DB path relative to NAS root */
+const DB_RELATIVE_PATH = 'marketing/marketing.db';
+
+/** Schema for scheduled_posts table (created if not exists) */
+const SCHEDULER_SCHEMA = `
+CREATE TABLE IF NOT EXISTS scheduled_posts (
+  id TEXT PRIMARY KEY,
+  platform TEXT NOT NULL,
+  action TEXT NOT NULL DEFAULT 'post',
+  text TEXT NOT NULL,
+  media_url TEXT,
+  media_urls TEXT,
+  link TEXT,
+  title TEXT,
+  scheduled_at INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'scheduled',
+  created_at INTEGER NOT NULL,
+  published_at INTEGER,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_posts_status ON scheduled_posts(status, scheduled_at);
+`;
 
 export interface ScheduledPost {
   id: string;
@@ -23,10 +47,40 @@ export interface ScheduledPost {
   error?: string;
 }
 
+/** Run sqlite3 CLI and return stdout */
+function runSql(dbPath: string, sql: string, json = false): string {
+  const dir = dirname(dbPath);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const args = json ? ['-json'] : [];
+  try {
+    return execSync(
+      `sqlite3 ${args.join(' ')} "${dbPath}"`,
+      { input: sql, encoding: 'utf-8', timeout: 10_000 },
+    ).trim();
+  } catch (err) {
+    log.error(`SQLite error: ${(err as Error).message}`);
+    throw err;
+  }
+}
+
+/** Ensure scheduled_posts table exists */
+function ensureTable(dbPath: string): void {
+  runSql(dbPath, SCHEDULER_SCHEMA);
+}
+
+/** Parse JSON rows from sqlite3 -json output */
+function parseRows<T>(output: string): T[] {
+  if (!output) return [];
+  try {
+    return JSON.parse(output) as T[];
+  } catch {
+    return [];
+  }
+}
+
 /**
- * Social media post scheduler.
- * Stores scheduled posts as JSON on NAS for persistence.
- * The agent checks and publishes due posts during its loop.
+ * Social media post scheduler — SQLite-backed (uses marketing.db).
+ * Atomic reads/writes, crash-safe, no JSON file corruption risks.
  */
 export class SocialSchedulerTool implements AgentTool {
   definition = {
@@ -53,7 +107,8 @@ export class SocialSchedulerTool implements AgentTool {
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const action = params['action'] as string;
-    const schedulePath = join(context.nasPath, 'config', 'social-schedule.json');
+    const dbPath = join(context.nasPath, DB_RELATIVE_PATH);
+    ensureTable(dbPath);
 
     switch (action) {
       case 'schedule': {
@@ -64,56 +119,48 @@ export class SocialSchedulerTool implements AgentTool {
           return createErrorResult('schedule requires: platform, text, scheduled_at');
         }
 
-        const posts = await this.loadSchedule(schedulePath);
-        const post: ScheduledPost = {
-          id: `sched-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          platform,
-          action: (params['post_type'] as string) || 'post',
-          text,
-          mediaUrl: params['media_url'] as string | undefined,
-          mediaUrls: params['media_urls'] as string[] | undefined,
-          link: params['link'] as string | undefined,
-          title: params['title'] as string | undefined,
-          scheduledAt: new Date(scheduledAt).getTime(),
-          status: 'scheduled',
-          createdAt: Date.now(),
-        };
+        const id = `sched-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const postType = (params['post_type'] as string) || 'post';
+        const mediaUrl = (params['media_url'] as string) || null;
+        const mediaUrls = params['media_urls'] ? JSON.stringify(params['media_urls']) : null;
+        const link = (params['link'] as string) || null;
+        const title = (params['title'] as string) || null;
+        const scheduledAtMs = new Date(scheduledAt).getTime();
+        const now = Date.now();
 
-        posts.push(post);
-        await this.saveSchedule(schedulePath, posts);
+        const escapeSql = (s: string | null) => s ? `'${s.replace(/'/g, "''")}'` : 'NULL';
+
+        runSql(dbPath, `INSERT INTO scheduled_posts (id, platform, action, text, media_url, media_urls, link, title, scheduled_at, status, created_at) VALUES (${escapeSql(id)}, ${escapeSql(platform)}, ${escapeSql(postType)}, ${escapeSql(text)}, ${escapeSql(mediaUrl)}, ${escapeSql(mediaUrls)}, ${escapeSql(link)}, ${escapeSql(title)}, ${scheduledAtMs}, 'scheduled', ${now});`);
 
         return createToolResult(
-          `Post scheduled:\n  ID: ${post.id}\n  Platform: ${platform}\n  Scheduled: ${scheduledAt}\n  Text: ${text.slice(0, 80)}...`,
+          `Post scheduled:\n  ID: ${id}\n  Platform: ${platform}\n  Scheduled: ${scheduledAt}\n  Text: ${text.slice(0, 80)}...`,
         );
       }
 
       case 'list': {
-        const posts = await this.loadSchedule(schedulePath);
-        const upcoming = posts
-          .filter((p) => p.status === 'scheduled')
-          .sort((a, b) => a.scheduledAt - b.scheduledAt);
+        const rows = parseRows<{ id: string; platform: string; scheduled_at: number; text: string; status: string }>(
+          runSql(dbPath, `SELECT id, platform, scheduled_at, text, status FROM scheduled_posts WHERE status = 'scheduled' ORDER BY scheduled_at ASC;`, true),
+        );
 
-        if (upcoming.length === 0) return createToolResult('No scheduled posts.');
+        if (rows.length === 0) return createToolResult('No scheduled posts.');
 
-        const list = upcoming.map((p, i) => {
-          const when = new Date(p.scheduledAt).toISOString();
+        const list = rows.map((p, i) => {
+          const when = new Date(p.scheduled_at).toISOString();
           return `${i + 1}. [${p.id}] ${p.platform} @ ${when}\n   ${p.text.slice(0, 60)}...`;
         });
 
-        return createToolResult(`Scheduled posts (${upcoming.length}):\n${list.join('\n')}`);
+        return createToolResult(`Scheduled posts (${rows.length}):\n${list.join('\n')}`);
       }
 
       case 'cancel': {
         const postId = params['post_id'] as string;
         if (!postId) return createErrorResult('cancel requires: post_id');
 
-        const posts = await this.loadSchedule(schedulePath);
-        const post = posts.find((p) => p.id === postId);
-        if (!post) return createErrorResult(`Post not found: ${postId}`);
-        if (post.status !== 'scheduled') return createErrorResult(`Post is already ${post.status}`);
-
-        post.status = 'cancelled';
-        await this.saveSchedule(schedulePath, posts);
+        const escapeSql = (s: string) => `'${s.replace(/'/g, "''")}'`;
+        runSql(dbPath, `UPDATE scheduled_posts SET status = 'cancelled' WHERE id = ${escapeSql(postId)} AND status = 'scheduled';`);
+        const changes = runSql(dbPath, 'SELECT changes() as n;', true);
+        const n = parseRows<{ n: number }>(changes)[0]?.n ?? 0;
+        if (n === 0) return createErrorResult(`Post not found or already processed: ${postId}`);
         return createToolResult(`Post ${postId} cancelled.`);
       }
 
@@ -122,12 +169,12 @@ export class SocialSchedulerTool implements AgentTool {
         const newTime = params['scheduled_at'] as string;
         if (!postId || !newTime) return createErrorResult('reschedule requires: post_id, scheduled_at');
 
-        const posts = await this.loadSchedule(schedulePath);
-        const post = posts.find((p) => p.id === postId);
-        if (!post) return createErrorResult(`Post not found: ${postId}`);
-
-        post.scheduledAt = new Date(newTime).getTime();
-        await this.saveSchedule(schedulePath, posts);
+        const newMs = new Date(newTime).getTime();
+        const escapeSql = (s: string) => `'${s.replace(/'/g, "''")}'`;
+        runSql(dbPath, `UPDATE scheduled_posts SET scheduled_at = ${newMs} WHERE id = ${escapeSql(postId)} AND status = 'scheduled';`);
+        const changes = runSql(dbPath, 'SELECT changes() as n;', true);
+        const n = parseRows<{ n: number }>(changes)[0]?.n ?? 0;
+        if (n === 0) return createErrorResult(`Post not found or already processed: ${postId}`);
         return createToolResult(`Post ${postId} rescheduled to ${newTime}`);
       }
 
@@ -135,55 +182,38 @@ export class SocialSchedulerTool implements AgentTool {
         return createErrorResult(`Unknown action: ${action}`);
     }
   }
-
-  private async loadSchedule(path: string): Promise<ScheduledPost[]> {
-    try {
-      const content = await readFile(path, 'utf-8');
-      return JSON.parse(content) as ScheduledPost[];
-    } catch {
-      return [];
-    }
-  }
-
-  private async saveSchedule(path: string, posts: ScheduledPost[]): Promise<void> {
-    await mkdir(join(path, '..'), { recursive: true });
-    await writeFile(path, JSON.stringify(posts, null, 2), 'utf-8');
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // Scheduled Post Executor — the automation engine
-// Runs on a timer, checks for due posts, publishes them
+// Runs on a timer, checks for due posts, publishes them (SQLite-backed)
 // ═══════════════════════════════════════════════════════════════════
 
 const MAX_PUBLISH_RETRIES = 2;
 
 export class ScheduledPostExecutor {
   private socialTool: SocialTool;
-  private schedulePath: string;
+  private dbPath: string;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
   constructor(
     socialConfig: SocialToolConfig,
     nasPath: string,
-    private readonly checkIntervalMs = 60_000, // check every 1 minute
+    private readonly checkIntervalMs = 60_000,
   ) {
     this.socialTool = new SocialTool(socialConfig);
-    this.schedulePath = join(nasPath, 'config', 'social-schedule.json');
+    this.dbPath = join(nasPath, DB_RELATIVE_PATH);
+    ensureTable(this.dbPath);
   }
 
-  /** Start the executor loop */
   start(): void {
     if (this.timer) return;
     log.info(`Scheduled post executor started (checking every ${this.checkIntervalMs / 1000}s)`);
-
-    // Run immediately, then on interval
     void this.tick();
     this.timer = setInterval(() => void this.tick(), this.checkIntervalMs);
   }
 
-  /** Stop the executor */
   stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
@@ -192,7 +222,6 @@ export class ScheduledPostExecutor {
     }
   }
 
-  /** Single tick — check and publish due posts */
   async tick(): Promise<{ published: number; failed: number }> {
     if (this.running) return { published: 0, failed: 0 };
     this.running = true;
@@ -201,31 +230,33 @@ export class ScheduledPostExecutor {
     let failed = 0;
 
     try {
-      const posts = await this.loadSchedule();
       const now = Date.now();
-      const duePosts = posts.filter(p => p.status === 'scheduled' && p.scheduledAt <= now);
+      const rows = parseRows<{
+        id: string; platform: string; action: string; text: string;
+        media_url: string | null; media_urls: string | null;
+        link: string | null; title: string | null;
+      }>(
+        runSql(this.dbPath, `SELECT id, platform, action, text, media_url, media_urls, link, title FROM scheduled_posts WHERE status = 'scheduled' AND scheduled_at <= ${now};`, true),
+      );
 
-      if (duePosts.length === 0) {
-        return { published: 0, failed: 0 };
-      }
+      if (rows.length === 0) return { published: 0, failed: 0 };
 
-      log.info({ count: duePosts.length }, 'Publishing due scheduled posts');
+      log.info({ count: rows.length }, 'Publishing due scheduled posts');
 
-      for (const post of duePosts) {
-        const success = await this.publishPost(post);
+      for (const row of rows) {
+        const success = await this.publishPost(row);
+        const escapeSql = (s: string) => `'${s.replace(/'/g, "''")}'`;
+
         if (success) {
-          post.status = 'published';
-          post.publishedAt = Date.now();
+          runSql(this.dbPath, `UPDATE scheduled_posts SET status = 'published', published_at = ${Date.now()} WHERE id = ${escapeSql(row.id)};`);
           published++;
-          log.info({ postId: post.id, platform: post.platform }, 'Scheduled post published');
+          log.info({ postId: row.id, platform: row.platform }, 'Scheduled post published');
         } else {
-          post.status = 'failed';
+          runSql(this.dbPath, `UPDATE scheduled_posts SET status = 'failed' WHERE id = ${escapeSql(row.id)};`);
           failed++;
-          log.error({ postId: post.id, platform: post.platform, error: post.error }, 'Scheduled post failed');
+          log.error({ postId: row.id, platform: row.platform }, 'Scheduled post failed');
         }
       }
-
-      await this.saveSchedule(posts);
     } catch (err) {
       log.error({ error: (err as Error).message }, 'Executor tick failed');
     } finally {
@@ -235,17 +266,22 @@ export class ScheduledPostExecutor {
     return { published, failed };
   }
 
-  /** Publish a single scheduled post via SocialTool */
-  private async publishPost(post: ScheduledPost): Promise<boolean> {
+  private async publishPost(row: {
+    id: string; platform: string; action: string; text: string;
+    media_url: string | null; media_urls: string | null;
+    link: string | null; title: string | null;
+  }): Promise<boolean> {
     const params: Record<string, unknown> = {
-      platform: post.platform,
-      action: post.action,
-      text: post.text,
+      platform: row.platform,
+      action: row.action,
+      text: row.text,
     };
-    if (post.mediaUrl) params['media_url'] = post.mediaUrl;
-    if (post.mediaUrls) params['media_urls'] = post.mediaUrls;
-    if (post.link) params['link'] = post.link;
-    if (post.title) params['title'] = post.title;
+    if (row.media_url) params['media_url'] = row.media_url;
+    if (row.media_urls) {
+      try { params['media_urls'] = JSON.parse(row.media_urls); } catch { /* ignore */ }
+    }
+    if (row.link) params['link'] = row.link;
+    if (row.title) params['title'] = row.title;
 
     for (let attempt = 1; attempt <= MAX_PUBLISH_RETRIES; attempt++) {
       try {
@@ -253,18 +289,15 @@ export class ScheduledPostExecutor {
         const result = await this.socialTool.execute(params, context);
 
         if (result.type === 'error') {
-          post.error = result.content;
           if (attempt < MAX_PUBLISH_RETRIES) {
-            log.warn({ postId: post.id, attempt }, `Publish attempt failed, retrying: ${result.content}`);
+            log.warn({ postId: row.id, attempt }, `Publish attempt failed, retrying: ${result.content}`);
             await new Promise(r => setTimeout(r, 3000 * attempt));
             continue;
           }
           return false;
         }
-
         return true;
       } catch (err) {
-        post.error = (err as Error).message;
         if (attempt < MAX_PUBLISH_RETRIES) {
           await new Promise(r => setTimeout(r, 3000 * attempt));
           continue;
@@ -275,30 +308,22 @@ export class ScheduledPostExecutor {
     return false;
   }
 
-  private async loadSchedule(): Promise<ScheduledPost[]> {
-    try {
-      const content = await readFile(this.schedulePath, 'utf-8');
-      return JSON.parse(content) as ScheduledPost[];
-    } catch {
-      return [];
-    }
-  }
-
-  private async saveSchedule(posts: ScheduledPost[]): Promise<void> {
-    await mkdir(join(this.schedulePath, '..'), { recursive: true });
-    await writeFile(this.schedulePath, JSON.stringify(posts, null, 2), 'utf-8');
-  }
-
-  /** Get statistics about the schedule */
   async getStats(): Promise<{ scheduled: number; published: number; failed: number; nextDue: string | null }> {
-    const posts = await this.loadSchedule();
-    const scheduled = posts.filter(p => p.status === 'scheduled');
-    const nextDue = scheduled.sort((a, b) => a.scheduledAt - b.scheduledAt)[0];
+    const rows = parseRows<{ status: string; cnt: number }>(
+      runSql(this.dbPath, `SELECT status, COUNT(*) as cnt FROM scheduled_posts GROUP BY status;`, true),
+    );
+    const byStatus = Object.fromEntries(rows.map(r => [r.status, r.cnt]));
+
+    const nextRows = parseRows<{ scheduled_at: number }>(
+      runSql(this.dbPath, `SELECT scheduled_at FROM scheduled_posts WHERE status = 'scheduled' ORDER BY scheduled_at ASC LIMIT 1;`, true),
+    );
+    const nextDue = nextRows[0] ? new Date(nextRows[0].scheduled_at).toISOString() : null;
+
     return {
-      scheduled: scheduled.length,
-      published: posts.filter(p => p.status === 'published').length,
-      failed: posts.filter(p => p.status === 'failed').length,
-      nextDue: nextDue ? new Date(nextDue.scheduledAt).toISOString() : null,
+      scheduled: byStatus['scheduled'] ?? 0,
+      published: byStatus['published'] ?? 0,
+      failed: byStatus['failed'] ?? 0,
+      nextDue,
     };
   }
 }

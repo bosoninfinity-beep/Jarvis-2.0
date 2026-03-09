@@ -82,6 +82,9 @@ export class WebSearchTool implements AgentTool {
     let data: BraveSearchResponse;
     try {
       data = await response.json() as BraveSearchResponse;
+    } catch (jsonErr) {
+      clearTimeout(timeoutId);
+      throw new Error(`Brave API returned invalid JSON: ${(jsonErr as Error).message}`);
     } finally {
       clearTimeout(timeoutId);
     }
@@ -124,6 +127,9 @@ export class WebSearchTool implements AgentTool {
     let data: PerplexityResponse;
     try {
       data = await response.json() as PerplexityResponse;
+    } catch (jsonErr) {
+      clearTimeout(timeoutId);
+      throw new Error(`Perplexity API returned invalid JSON: ${(jsonErr as Error).message}`);
     } finally {
       clearTimeout(timeoutId);
     }

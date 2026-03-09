@@ -9,10 +9,10 @@ const MAX_FILE_SIZE = 1_000_000; // 1MB read limit
 const MAX_LINES = 5000;
 
 const ALLOWED_ROOTS = [
-  process.env['HOME'] || '/Users/kamilpadula',
+  process.env['HOME'] || '/Users/jarvis',
   '/tmp',
   '/var/tmp',
-  process.env['NAS_MOUNT_PATH'] || '/Volumes/JarvisNAS/jarvis',
+  process.env['NAS_MOUNT_PATH'] || '/Volumes/Public/jarvis-nas',
 ];
 
 const BLOCKED_PATHS = [

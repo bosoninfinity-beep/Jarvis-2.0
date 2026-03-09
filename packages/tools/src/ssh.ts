@@ -1,5 +1,5 @@
 import { Client } from 'ssh2';
-import { readFileSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createLogger } from '@jarvis/shared';
@@ -65,8 +65,8 @@ function parseKnownHosts(): Map<string, Set<string>> {
 
 /**
  * Create a host key verifier that checks against ~/.ssh/known_hosts.
- * Implements TOFU (Trust On First Use): unknown hosts are added automatically
- * with a logged warning. Known hosts are verified against stored fingerprints.
+ * Unknown hosts are REJECTED — no TOFU (Trust On First Use).
+ * Add hosts to known_hosts manually or via ssh-keyscan before using this tool.
  */
 function createHostVerifier(hostname: string): (key: Buffer) => boolean {
   return (key: Buffer): boolean => {
@@ -75,7 +75,7 @@ function createHostVerifier(hostname: string): (key: Buffer) => boolean {
     const knownFingerprints = knownHosts.get(hostname);
 
     if (knownFingerprints) {
-      // Host is in known_hosts - verify the fingerprint matches
+      // Host is in known_hosts — verify the fingerprint matches
       if (knownFingerprints.has(fingerprint)) {
         return true;
       }
@@ -87,23 +87,12 @@ function createHostVerifier(hostname: string): (key: Buffer) => boolean {
       return false;
     }
 
-    // TOFU: Host not in known_hosts - trust on first use and record the key
-    log.warn(
-      `TOFU: Host ${hostname} not found in known_hosts. ` +
-      `Adding key with fingerprint SHA-256:${fingerprint}. ` +
-      `Verify this is the correct host.`
+    // Host not in known_hosts — REJECT (no auto-trust)
+    log.error(
+      `SSH host ${hostname} not found in known_hosts. Connection rejected. ` +
+      `Add the host key manually: ssh-keyscan ${hostname} >> ~/.ssh/known_hosts`
     );
-
-    try {
-      const keyBase64 = key.toString('base64');
-      const entry = `${hostname} ssh-key ${keyBase64}\n`;
-      appendFileSync(KNOWN_HOSTS_PATH, entry, { mode: 0o600 });
-      log.info(`Added ${hostname} to ${KNOWN_HOSTS_PATH}`);
-    } catch (err) {
-      log.warn(`Failed to append to known_hosts: ${(err as Error).message}`);
-    }
-
-    return true;
+    return false;
   };
 }
 

@@ -226,18 +226,14 @@ export class MediaGenTool implements AgentTool {
 
       const data = await response.json() as { data?: { task_id?: string; video_url?: string } };
 
-      // If async task, return task ID for polling via exec
+      const savePath = join(nasPath, 'media', 'videos', product, `${filename}.mp4`);
+
+      // If async task, poll for completion (like Flux)
       if (data.data?.task_id && !data.data.video_url) {
-        return createToolResult(
-          `Kling video generation started.\nTask ID: ${data.data.task_id}\n` +
-          `Poll status: exec("curl -H 'Authorization: Bearer $KLING_API_KEY' https://api.klingai.com/v1/videos/text2video/${data.data.task_id}")\n` +
-          `Video will be saved to: ${join(nasPath, 'media', 'videos', product, `${filename}.mp4`)}`,
-          { taskId: data.data.task_id, tool: 'kling', product },
-        );
+        return this.pollKlingResult(data.data.task_id, savePath, duration);
       }
 
       if (data.data?.video_url) {
-        const savePath = join(nasPath, 'media', 'videos', product, `${filename}.mp4`);
         await this.downloadAndSave(data.data.video_url, savePath);
         return createToolResult(
           `Video generated via Kling 3.0\nSaved: ${savePath}\nDuration: ${duration}s`,
@@ -344,16 +340,63 @@ export class MediaGenTool implements AgentTool {
 
       const data = await response.json() as { data?: { video_id?: string } };
       const videoId = data.data?.video_id;
+      if (!videoId) return createErrorResult('HeyGen did not return a video_id');
 
-      return createToolResult(
-        `HeyGen avatar video generation started.\nVideo ID: ${videoId}\n` +
-        `Poll status: exec("curl -H 'X-Api-Key: $HEYGEN_API_KEY' https://api.heygen.com/v1/video_status.get?video_id=${videoId}")\n` +
-        `When complete, download the video URL and save to: ${join(nasPath, 'media', 'videos', product, `${filename}.mp4`)}`,
-        { videoId, tool: 'heygen', product },
-      );
+      const savePath = join(nasPath, 'media', 'videos', product, `${filename}.mp4`);
+      return this.pollHeyGenResult(videoId, savePath);
     } catch (err) {
       return createErrorResult(`HeyGen avatar generation failed: ${(err as Error).message}`);
     }
+  }
+
+  // ── Polling ──
+
+  private async pollKlingResult(taskId: string, savePath: string, duration: number): Promise<ToolResult> {
+    const maxAttempts = 60; // 2 min max (video gen is slower than images)
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const res = await fetch(`https://api.klingai.com/v1/videos/text2video/${taskId}`, {
+          headers: { 'Authorization': `Bearer ${this.config.klingApiKey}` },
+        });
+        const status = await res.json() as { data?: { status?: string; video_url?: string } };
+        if (status.data?.status === 'completed' && status.data.video_url) {
+          await this.downloadAndSave(status.data.video_url, savePath);
+          return createToolResult(
+            `Video generated via Kling 3.0\nSaved: ${savePath}\nDuration: ${duration}s`,
+            { path: savePath, tool: 'kling', duration },
+          );
+        }
+        if (status.data?.status === 'failed') {
+          return createErrorResult('Kling video generation failed');
+        }
+      } catch { /* retry */ }
+    }
+    return createErrorResult(`Kling video generation timed out (120s). Task ID: ${taskId}`);
+  }
+
+  private async pollHeyGenResult(videoId: string, savePath: string): Promise<ToolResult> {
+    const maxAttempts = 90; // 3 min max (avatar gen is slowest)
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const res = await fetch(`https://api.heygen.com/v1/video_status.get?video_id=${videoId}`, {
+          headers: { 'X-Api-Key': this.config.heygenApiKey! },
+        });
+        const data = await res.json() as { data?: { status?: string; video_url?: string } };
+        if (data.data?.status === 'completed' && data.data.video_url) {
+          await this.downloadAndSave(data.data.video_url, savePath);
+          return createToolResult(
+            `Avatar video generated via HeyGen\nSaved: ${savePath}`,
+            { path: savePath, tool: 'heygen', videoId },
+          );
+        }
+        if (data.data?.status === 'failed') {
+          return createErrorResult(`HeyGen avatar generation failed (video_id: ${videoId})`);
+        }
+      } catch { /* retry */ }
+    }
+    return createErrorResult(`HeyGen avatar generation timed out (180s). Video ID: ${videoId}`);
   }
 
   // ── Helpers ──

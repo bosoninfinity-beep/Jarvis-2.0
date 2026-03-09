@@ -6,6 +6,11 @@ const log = createLogger('tool:message-agent');
 
 type NatsPublishFn = (subject: string, data: unknown) => Promise<void>;
 
+/** Per-session inter-agent message tracking to prevent loops */
+const sessionMessageCounts = new Map<string, { total: number; perTarget: Record<string, number> }>();
+const MAX_MESSAGES_PER_SESSION = 10;
+const MAX_MESSAGES_PER_TARGET = 5;
+
 /**
  * Inter-agent messaging tool via NATS.
  * Allows agents to send messages, queries, notifications, and delegation requests to other agents.
@@ -57,6 +62,30 @@ export class MessageAgentTool implements AgentTool {
     if (!type) return createErrorResult('Missing required parameter: type');
     if (!content) return createErrorResult('Missing required parameter: content');
     if (to === context.agentId) return createErrorResult('Cannot send a message to yourself');
+
+    // Anti-loop: track inter-agent messages per session
+    const sessionKey = (context as { sessionId?: string }).sessionId ?? context.agentId;
+    if (!sessionMessageCounts.has(sessionKey)) {
+      sessionMessageCounts.set(sessionKey, { total: 0, perTarget: {} });
+    }
+    const counts = sessionMessageCounts.get(sessionKey)!;
+    counts.total++;
+    counts.perTarget[to] = (counts.perTarget[to] || 0) + 1;
+
+    if (counts.total > MAX_MESSAGES_PER_SESSION) {
+      log.warn(`Inter-agent message limit reached: ${counts.total} messages this session`);
+      return createErrorResult(
+        `Inter-agent message limit reached (${counts.total}/${MAX_MESSAGES_PER_SESSION}). ` +
+        `You are sending too many messages. Stop and report what you have so far.`,
+      );
+    }
+    if (counts.perTarget[to]! > MAX_MESSAGES_PER_TARGET) {
+      log.warn(`Per-target message limit reached: ${counts.perTarget[to]} messages to ${to}`);
+      return createErrorResult(
+        `Too many messages to ${to} (${counts.perTarget[to]}/${MAX_MESSAGES_PER_TARGET}). ` +
+        `You may be in a delegation loop. Stop and report the issue.`,
+      );
+    }
 
     const message = {
       id: crypto.randomUUID(),

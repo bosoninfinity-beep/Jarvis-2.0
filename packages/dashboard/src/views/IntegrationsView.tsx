@@ -22,6 +22,11 @@ import {
   Bell,
   Wifi,
   WifiOff,
+  Plug,
+  Check,
+  X,
+  Loader2,
+  Key,
 } from 'lucide-react';
 import { formatTimeAgo } from '../utils/formatters.js';
 
@@ -40,7 +45,7 @@ interface IntegrationStatus {
 export function IntegrationsView() {
   const connected = useGatewayStore((s) => s.connected);
   const [status, setStatus] = useState<IntegrationStatus | null>(null);
-  const [activeTab, setActiveTab] = useState<'imessage' | 'spotify' | 'homeassistant' | 'cron' | 'calendar'>('imessage');
+  const [activeTab, setActiveTab] = useState<'mcp' | 'imessage' | 'spotify' | 'homeassistant' | 'cron' | 'calendar'>('mcp');
   const [lastPoll, setLastPoll] = useState<number>(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -75,6 +80,7 @@ export function IntegrationsView() {
   }, [connected, fetchStatus]);
 
   const integrations = [
+    { id: 'mcp' as const, name: 'MCP Servers', icon: Plug, color: '#a78bfa', available: true },
     { id: 'imessage' as const, name: 'iMessage', icon: MessageCircle, color: 'var(--green-bright)', available: status?.imessage?.available ?? true },
     { id: 'spotify' as const, name: 'Spotify', icon: Music, color: '#1DB954', available: status?.spotify?.available ?? true },
     { id: 'homeassistant' as const, name: 'Home Assistant', icon: Home, color: '#41BDF5', available: status?.homeAssistant?.available ?? false },
@@ -210,6 +216,7 @@ export function IntegrationsView() {
         minHeight: 400,
         overflow: 'hidden',
       }}>
+        {activeTab === 'mcp' && <McpPanel />}
         {activeTab === 'imessage' && <IMessagePanel />}
         {activeTab === 'spotify' && <SpotifyPanel />}
         {activeTab === 'homeassistant' && <HomeAssistantPanel />}
@@ -231,6 +238,246 @@ function StatusDot({ available }: { available: boolean }) {
       display: 'inline-block',
       flexShrink: 0,
     }} />
+  );
+}
+
+// ─── MCP Servers Panel ───────────────────────────────────────────────
+
+interface McpServer {
+  id: string;
+  name: string;
+  description: string;
+  envKey: string;
+  envType: 'toggle' | 'token';
+  role: 'marketing' | 'dev' | 'all';
+  color: string;
+}
+
+const MCP_SERVERS: McpServer[] = [
+  { id: 'gmail', name: 'Gmail', description: 'Read/send emails — outreach, newsletters, follow-ups', envKey: 'GMAIL_MCP_ENABLED', envType: 'toggle', role: 'marketing', color: '#EA4335' },
+  { id: 'gcal', name: 'Google Calendar', description: 'Content scheduling as calendar events', envKey: 'GOOGLE_CALENDAR_MCP_ENABLED', envType: 'toggle', role: 'marketing', color: '#4285F4' },
+  { id: 'github', name: 'GitHub', description: 'Issues, PRs, repos — code management', envKey: 'GITHUB_PERSONAL_ACCESS_TOKEN', envType: 'token', role: 'dev', color: '#f0f6fc' },
+  { id: 'firebase', name: 'Firebase', description: 'Firestore, Hosting, Functions deployment', envKey: 'FIREBASE_MCP_ENABLED', envType: 'toggle', role: 'dev', color: '#FFCA28' },
+  { id: 'slack', name: 'Slack', description: 'Send messages, channel notifications', envKey: 'SLACK_MCP_ENABLED', envType: 'toggle', role: 'all', color: '#4A154B' },
+  { id: 'stripe', name: 'Stripe', description: 'Payments, subscriptions, revenue data', envKey: 'STRIPE_MCP_ENABLED', envType: 'toggle', role: 'all', color: '#635BFF' },
+];
+
+function McpPanel() {
+  const [envVars, setEnvVars] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [tokenInputs, setTokenInputs] = useState<Record<string, string>>({});
+
+  const fetchEnv = useCallback(async () => {
+    try {
+      const data = await gateway.request<{ variables: Record<string, string> }>('environment.list');
+      setEnvVars(data?.variables ?? {});
+    } catch {
+      setEnvVars({});
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void fetchEnv(); }, [fetchEnv]);
+
+  const toggleServer = async (server: McpServer) => {
+    setSaving(server.id);
+    try {
+      const isEnabled = envVars[server.envKey] === '1';
+      if (isEnabled) {
+        await gateway.request('environment.delete', { key: server.envKey });
+      } else {
+        await gateway.request('environment.set', { key: server.envKey, value: '1' });
+      }
+      await fetchEnv();
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const saveToken = async (server: McpServer) => {
+    const token = tokenInputs[server.id];
+    if (!token) return;
+    setSaving(server.id);
+    try {
+      await gateway.request('environment.set', { key: server.envKey, value: token });
+      await fetchEnv();
+      setTokenInputs(prev => ({ ...prev, [server.id]: '' }));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const removeToken = async (server: McpServer) => {
+    setSaving(server.id);
+    try {
+      await gateway.request('environment.delete', { key: server.envKey });
+      await fetchEnv();
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const roleLabel = (role: string) => {
+    switch (role) {
+      case 'marketing': return 'JOHNY';
+      case 'dev': return 'SMITH';
+      default: return 'ALL';
+    }
+  };
+
+  const roleColor = (role: string) => {
+    switch (role) {
+      case 'marketing': return '#ffaa00';
+      case 'dev': return '#00ffff';
+      default: return '#a78bfa';
+    }
+  };
+
+  return (
+    <div style={{ padding: 16 }}>
+      <PanelHeader icon={<Plug size={16} color="#a78bfa" />} title="MCP SERVERS" subtitle="Claude CLI native integrations (per agent role)" color="#a78bfa" />
+
+      <InfoBox text="MCP servers are attached to Claude CLI agents based on their role. Toggle servers below — changes take effect on next agent task. Agents must be restarted for MCP changes to apply." show />
+
+      <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {MCP_SERVERS.map((server) => {
+          const isEnabled = server.envType === 'toggle'
+            ? envVars[server.envKey] === '1'
+            : !!envVars[server.envKey];
+          const isSaving = saving === server.id;
+
+          return (
+            <div key={server.id} style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '12px 14px',
+              background: isEnabled ? 'rgba(0,255,65,0.03)' : 'rgba(0,0,0,0.2)',
+              border: `1px solid ${isEnabled ? server.color + '44' : 'var(--border-primary)'}`,
+              borderRadius: 6,
+              transition: 'all 0.15s ease',
+            }}>
+              {/* Status dot */}
+              <StatusDot available={isEnabled} />
+
+              {/* Info */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{
+                    fontFamily: 'var(--font-display)',
+                    fontSize: 11,
+                    letterSpacing: 1.5,
+                    color: isEnabled ? server.color : 'var(--text-secondary)',
+                  }}>
+                    {server.name.toUpperCase()}
+                  </span>
+                  <span style={{
+                    fontSize: 8,
+                    fontFamily: 'var(--font-display)',
+                    letterSpacing: 1,
+                    padding: '1px 6px',
+                    borderRadius: 3,
+                    background: roleColor(server.role) + '15',
+                    color: roleColor(server.role),
+                    border: `1px solid ${roleColor(server.role)}33`,
+                  }}>
+                    {roleLabel(server.role)}
+                  </span>
+                </div>
+                <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                  {server.description}
+                </span>
+              </div>
+
+              {/* Action */}
+              {server.envType === 'toggle' ? (
+                <button
+                  onClick={() => void toggleServer(server)}
+                  disabled={isSaving || loading}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '5px 14px',
+                    fontSize: 9,
+                    fontFamily: 'var(--font-display)',
+                    letterSpacing: 1,
+                    color: isEnabled ? '#00ff41' : 'var(--text-muted)',
+                    background: isEnabled ? 'rgba(0,255,65,0.08)' : 'rgba(0,0,0,0.3)',
+                    border: `1px solid ${isEnabled ? '#00ff4133' : 'var(--border-primary)'}`,
+                    borderRadius: 4,
+                    cursor: isSaving ? 'wait' : 'pointer',
+                    minWidth: 80,
+                    justifyContent: 'center',
+                  }}
+                >
+                  {isSaving ? <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> :
+                    isEnabled ? <><Check size={10} /> ENABLED</> : <><X size={10} /> DISABLED</>
+                  }
+                </button>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {isEnabled ? (
+                    <>
+                      <span style={{ fontSize: 9, color: '#00ff41', fontFamily: 'var(--font-mono)' }}>
+                        {envVars[server.envKey]!.slice(0, 8)}...
+                      </span>
+                      <button
+                        onClick={() => void removeToken(server)}
+                        disabled={isSaving}
+                        style={{
+                          ...btnStyle,
+                          padding: '4px 10px',
+                          fontSize: 9,
+                          color: '#ff6b6b',
+                          borderColor: '#ff6b6b33',
+                          background: 'rgba(255,107,107,0.05)',
+                        }}
+                      >
+                        {isSaving ? <Loader2 size={10} /> : <X size={10} />} REMOVE
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <input
+                        type="password"
+                        placeholder="Paste token..."
+                        value={tokenInputs[server.id] ?? ''}
+                        onChange={(e) => setTokenInputs(prev => ({ ...prev, [server.id]: e.target.value }))}
+                        style={{ ...inputStyle, width: 160, fontSize: 10 }}
+                      />
+                      <button
+                        onClick={() => void saveToken(server)}
+                        disabled={isSaving || !tokenInputs[server.id]}
+                        style={{ ...btnStyle, padding: '4px 10px', fontSize: 9 }}
+                      >
+                        {isSaving ? <Loader2 size={10} /> : <Key size={10} />} SAVE
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{
+        marginTop: 16,
+        padding: 10,
+        fontSize: 9,
+        color: 'var(--text-muted)',
+        fontFamily: 'var(--font-mono)',
+        lineHeight: 1.6,
+        borderTop: '1px solid var(--border-primary)',
+      }}>
+        MCP (Model Context Protocol) servers give Claude CLI native access to external services.
+        Each server runs as a subprocess inside the Claude CLI process — no custom tool code needed.
+        Toggle: set env var to "1". Token: paste API token/key. Changes persist in NAS config.
+      </div>
+    </div>
   );
 }
 

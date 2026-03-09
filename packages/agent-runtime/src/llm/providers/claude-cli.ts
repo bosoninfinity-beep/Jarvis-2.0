@@ -4,10 +4,9 @@
  * Bills to Claude Max subscription (no API key costs).
  * Spawns `claude -p` for each turn, parses JSON output.
  *
- * Tool handling: Injects tool definitions into the prompt and uses
- * structured JSON output to parse tool calls. When Claude wants to
- * call a tool, it outputs a specific JSON format that we parse into
- * ToolUseBlock objects.
+ * Tool handling: Tool definitions are passed via --system-prompt flag
+ * (separate from conversation text) so they're always visible to the model.
+ * Claude outputs <tool_call> JSON blocks which we parse into ToolUseBlock objects.
  */
 import { createLogger } from '@jarvis/shared';
 import { execSync, spawn } from 'node:child_process';
@@ -48,6 +47,55 @@ const CLAUDE_BIN = resolveClaudeBin();
 /** Timeout for Claude CLI subprocess (10 minutes) */
 const SPAWN_TIMEOUT_MS = 600_000;
 
+/** Jarvis tools that have built-in Claude CLI equivalents — skip from text injection */
+const CLI_BUILTIN_TOOL_NAMES = new Set([
+  'exec',        // → Bash
+  'read',        // → Read
+  'write',       // → Write
+  'edit',        // → Edit
+  'list',        // → Glob
+  'search',      // → Grep
+  'web_fetch',   // → WebFetch
+  'web_search',  // → WebSearch
+]);
+
+/** Claude CLI built-in tools to enable via --tools flag */
+const CLI_BUILTIN_TOOLS = 'Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch';
+
+/** Per-role MCP server configs — injected via --mcp-config */
+const ROLE_MCP_CONFIGS: Record<string, Record<string, { command?: string; args?: string[]; url?: string; headers?: Record<string, string> }>> = {
+  marketing: {
+    // Gmail MCP for email outreach, newsletters, follow-ups
+    ...(process.env['GMAIL_MCP_ENABLED'] === '1' ? {
+      gmail: { command: 'npx', args: ['-y', '@anthropic/mcp-gmail'] },
+    } : {}),
+    // Google Calendar for content scheduling
+    ...(process.env['GOOGLE_CALENDAR_MCP_ENABLED'] === '1' ? {
+      'google-calendar': { command: 'npx', args: ['-y', '@anthropic/mcp-google-calendar'] },
+    } : {}),
+  },
+  dev: {
+    // GitHub for issues, PRs, repos
+    ...(process.env['GITHUB_PERSONAL_ACCESS_TOKEN'] ? {
+      github: { url: 'https://api.githubcopilot.com/mcp/', headers: { Authorization: `Bearer ${process.env['GITHUB_PERSONAL_ACCESS_TOKEN']}` } },
+    } : {}),
+    // Firebase for Firestore, Hosting, Functions
+    ...(process.env['FIREBASE_MCP_ENABLED'] === '1' ? {
+      firebase: { command: 'npx', args: ['-y', 'firebase-tools@latest', 'mcp'] },
+    } : {}),
+  },
+};
+
+/** Per-role allowed tools — restricts what CLI built-ins each role can use */
+const ROLE_ALLOWED_TOOLS: Record<string, string> = {
+  marketing: 'Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch',
+  dev: 'Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch',
+  orchestrator: 'Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch',
+};
+
+/** Max API budget per CLI invocation (USD). 0 = unlimited (Max subscription). */
+const MAX_BUDGET_USD = parseFloat(process.env['CLAUDE_CLI_MAX_BUDGET_USD'] ?? '0');
+
 const ALLOWED_MODELS = new Set(['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001']);
 
 const MODELS: ModelInfo[] = [
@@ -68,23 +116,34 @@ function isClaudeAvailable(): boolean {
 }
 
 /**
- * Convert multi-turn messages into a single prompt string for `claude -p`.
- * Includes system prompt, tool definitions, and conversation history.
+ * Build system prompt for --system-prompt flag.
+ * Contains agent identity, instructions, and tool definitions.
+ * Passed via CLI flag so it's ALWAYS visible to the model (never buried in text).
  */
-function buildPrompt(request: ChatRequest): string {
+function buildSystemPrompt(request: ChatRequest): string {
   const parts: string[] = [];
 
-  // System prompt
   if (request.system) {
     parts.push(request.system);
   }
 
-  // Tool definitions (injected into prompt for subprocess mode)
-  if (request.tools && request.tools.length > 0) {
-    parts.push(buildToolPrompt(request.tools));
+  // Only inject CUSTOM tool definitions — built-in tools are handled natively by Claude CLI
+  const customTools = request.tools?.filter(t => !CLI_BUILTIN_TOOL_NAMES.has(t.name)) ?? [];
+  if (customTools.length > 0) {
+    parts.push(buildToolPrompt(customTools));
   }
 
-  // Conversation history
+  return parts.join('\n\n');
+}
+
+/**
+ * Build conversation prompt for stdin.
+ * Contains ONLY conversation history (no system prompt, no tool definitions).
+ * Tool definitions are in --system-prompt flag, so they don't get lost here.
+ */
+function buildConversationPrompt(request: ChatRequest): string {
+  const parts: string[] = [];
+
   for (const msg of request.messages) {
     if (msg.role === 'system') continue;
 
@@ -134,6 +193,13 @@ function buildPrompt(request: ChatRequest): string {
         parts.push(`${msg.role === 'user' ? 'Human' : 'Assistant'}: ${allText}`);
       }
     }
+  }
+
+  // Compact tool reminder — only for CUSTOM tools (built-in tools are handled natively by CLI)
+  const customTools = request.tools?.filter(t => !CLI_BUILTIN_TOOL_NAMES.has(t.name)) ?? [];
+  if (customTools.length > 0) {
+    const toolNames = customTools.map(t => t.name).join(', ');
+    parts.push(`[SYSTEM: Custom tools available: ${toolNames}. Use <tool_call> tags. For file/shell/web operations, use your built-in tools directly.]`);
   }
 
   return parts.join('\n\n');
@@ -197,6 +263,33 @@ function parseToolCalls(text: string): { textContent: string; toolCalls: Array<{
   return { textContent, toolCalls };
 }
 
+/**
+ * Build role-specific CLI args (MCP config, allowed tools, budget cap).
+ * Reads AGENT_ROLE from env to determine which MCP servers to attach.
+ */
+function buildRoleArgs(): string[] {
+  const role = process.env['AGENT_ROLE'] ?? process.env['JARVIS_AGENT_ROLE'] ?? 'orchestrator';
+  const args: string[] = [];
+
+  // Role-specific tools (currently same for all, but easily customizable)
+  const tools = ROLE_ALLOWED_TOOLS[role] ?? CLI_BUILTIN_TOOLS;
+  args.push('--tools', tools);
+
+  // MCP servers per role
+  const mcpConfig = ROLE_MCP_CONFIGS[role];
+  if (mcpConfig && Object.keys(mcpConfig).length > 0) {
+    args.push('--mcp-config', JSON.stringify({ mcpServers: mcpConfig }));
+    log.info(`MCP servers for role ${role}: ${Object.keys(mcpConfig).join(', ')}`);
+  }
+
+  // Budget cap
+  if (MAX_BUDGET_USD > 0) {
+    args.push('--max-budget-usd', String(MAX_BUDGET_USD));
+  }
+
+  return args;
+}
+
 export class ClaudeCliProvider implements LLMProvider {
   readonly id = 'claude-cli';
   readonly name = 'Claude CLI (Max)';
@@ -222,7 +315,8 @@ export class ClaudeCliProvider implements LLMProvider {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     if (!this.available) throw new Error('Claude CLI not available');
 
-    const prompt = buildPrompt(request);
+    const systemPrompt = buildSystemPrompt(request);
+    const conversationPrompt = buildConversationPrompt(request);
     const model = request.model || 'claude-opus-4-6';
 
     // Validate model name to prevent argument injection
@@ -230,10 +324,10 @@ export class ClaudeCliProvider implements LLMProvider {
       throw new Error(`Model '${model}' is not in the allowed list for Claude CLI`);
     }
 
-    log.info(`Calling claude -p (model: ${model}, prompt: ${prompt.length} chars)`);
+    log.info(`Calling claude -p (model: ${model}, system: ${systemPrompt.length} chars, conversation: ${conversationPrompt.length} chars)`);
 
     try {
-      // Use spawn to pass prompt via stdin — only pass necessary env vars
+      // Use spawn to pass conversation via stdin, system prompt via --system-prompt flag
       const response = await new Promise<string>((resolve, reject) => {
         const safeEnv: Record<string, string> = {
           PATH: process.env['PATH'] ?? '',
@@ -248,12 +342,16 @@ export class ClaudeCliProvider implements LLMProvider {
         if (process.env['NVM_DIR']) safeEnv['NVM_DIR'] = process.env['NVM_DIR'];
         if (process.env['NVM_BIN']) safeEnv['NVM_BIN'] = process.env['NVM_BIN'];
 
+        const roleArgs = buildRoleArgs();
         const child = spawn(CLAUDE_BIN, [
           '-p',
           '--output-format', 'json',
           '--model', model,
           '--no-session-persistence',
-          '--tools', '',
+          '--dangerously-skip-permissions',
+          '--effort', 'high',
+          ...roleArgs,
+          '--system-prompt', systemPrompt,
         ], {
           env: safeEnv,
           timeout: SPAWN_TIMEOUT_MS,
@@ -280,8 +378,8 @@ export class ClaudeCliProvider implements LLMProvider {
           reject(new Error(`Claude CLI stdin error (EPIPE): ${err.message}. Is 'claude' CLI installed?`));
         });
 
-        // Write prompt to stdin and close
-        child.stdin.write(prompt);
+        // Write ONLY conversation to stdin (system prompt is in --system-prompt flag)
+        child.stdin.write(conversationPrompt);
         child.stdin.end();
       });
 
@@ -371,10 +469,11 @@ export class ClaudeCliProvider implements LLMProvider {
       return;
     }
 
-    const prompt = buildPrompt(request);
+    const systemPrompt = buildSystemPrompt(request);
+    const conversationPrompt = buildConversationPrompt(request);
     const model = request.model || 'claude-opus-4-6';
 
-    log.info(`Streaming claude -p (model: ${model}, prompt: ${prompt.length} chars)`);
+    log.info(`Streaming claude -p (model: ${model}, system: ${systemPrompt.length} chars, conversation: ${conversationPrompt.length} chars)`);
 
     // Validate model name
     if (!ALLOWED_MODELS.has(model)) {
@@ -395,6 +494,7 @@ export class ClaudeCliProvider implements LLMProvider {
     if (process.env['NVM_DIR']) safeEnv['NVM_DIR'] = process.env['NVM_DIR'];
     if (process.env['NVM_BIN']) safeEnv['NVM_BIN'] = process.env['NVM_BIN'];
 
+    const roleArgs = buildRoleArgs();
     const child = spawn(CLAUDE_BIN, [
       '-p',
       '--output-format', 'stream-json',
@@ -402,7 +502,10 @@ export class ClaudeCliProvider implements LLMProvider {
       '--include-partial-messages',
       '--model', model,
       '--no-session-persistence',
-      '--tools', '',
+      '--dangerously-skip-permissions',
+      '--effort', 'high',
+      ...roleArgs,
+      '--system-prompt', systemPrompt,
     ], {
       env: safeEnv,
       timeout: SPAWN_TIMEOUT_MS,
@@ -524,8 +627,8 @@ export class ClaudeCliProvider implements LLMProvider {
       }
     });
 
-    // Write prompt to stdin
-    child.stdin.write(prompt);
+    // Write ONLY conversation to stdin (system prompt is in --system-prompt flag)
+    child.stdin.write(conversationPrompt);
     child.stdin.end();
 
     rl.on('close', () => {

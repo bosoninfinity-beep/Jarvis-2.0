@@ -37,11 +37,20 @@ interface RateState {
   perToolCounts: Record<string, number>;
 }
 
+/** Tools that are inherently dangerous — SSH, exec, inter-agent messaging */
+const DANGEROUS_TOOLS = new Set(['ssh_exec', 'exec', 'message_agent', 'computer']);
+
+/** Max calls to any single dangerous tool per session */
+const MAX_DANGEROUS_TOOL_PER_SESSION = 25;
+
+/** Max total dangerous tool calls (all combined) per session */
+const MAX_DANGEROUS_TOTAL_PER_SESSION = 40;
+
 const DEFAULT_CONFIG: RateLimitConfig = {
-  maxToolCallsPerMinute: 60,
-  maxToolCallsPerSession: 500,
+  maxToolCallsPerMinute: 30,
+  maxToolCallsPerSession: 200,
   maxTokensPerSession: 500_000,
-  maxConsecutiveSameToolCalls: 15,
+  maxConsecutiveSameToolCalls: 5,
   cooldownMs: 100,
 };
 
@@ -125,17 +134,8 @@ export function createRateLimiterPlugin(): JarvisPluginDefinition {
         },
       });
 
-      api.registerTool({
-        name: 'rate_limiter_reset',
-        description: 'Reset all rate limiter counters. Use if you hit a limit and need to continue.',
-        inputSchema: { type: 'object' as const, properties: {} },
-        execute: async (_params, ctx) => {
-          const sessionId = (ctx as { sessionId?: string }).sessionId ?? '';
-          sessionStateMap.set(sessionId, createSessionState());
-          log.info('Rate limiter counters reset');
-          return { type: 'text' as const, text: 'Rate limiter counters have been reset.' };
-        },
-      });
+      // NOTE: rate_limiter_reset was intentionally REMOVED — agents must NOT
+      // be able to reset their own rate limits. Only a session restart resets them.
 
       // --- Hooks ---
 
@@ -144,6 +144,7 @@ export function createRateLimiterPlugin(): JarvisPluginDefinition {
         resetMinuteWindow(state);
         const now = Date.now();
         const toolName = event.toolName;
+        const isDangerous = DANGEROUS_TOOLS.has(toolName);
 
         // Track per-tool counts
         state.perToolCounts[toolName] = (state.perToolCounts[toolName] || 0) + 1;
@@ -162,8 +163,33 @@ export function createRateLimiterPlugin(): JarvisPluginDefinition {
           log.warn(`Rate limiter: session token budget exceeded (${state.tokensThisSession.toLocaleString()}/${config.maxTokensPerSession.toLocaleString()})`);
           return {
             block: true,
-            blockReason: `Rate limit: token budget exceeded — ${state.tokensThisSession.toLocaleString()} tokens used (max: ${config.maxTokensPerSession.toLocaleString()}). Use rate_limiter_reset to clear.`,
+            blockReason: `Rate limit: token budget exceeded — ${state.tokensThisSession.toLocaleString()} tokens used (max: ${config.maxTokensPerSession.toLocaleString()}). This limit cannot be reset — finish the task or start a new session.`,
           };
+        }
+
+        // Check: dangerous tool per-tool session limit
+        if (isDangerous && state.perToolCounts[toolName]! > MAX_DANGEROUS_TOOL_PER_SESSION) {
+          state.totalBlocked++;
+          log.warn(`Rate limiter: dangerous tool ${toolName} session limit hit (${state.perToolCounts[toolName]}/${MAX_DANGEROUS_TOOL_PER_SESSION})`);
+          return {
+            block: true,
+            blockReason: `Rate limit: ${toolName} used ${state.perToolCounts[toolName]} times this session (max: ${MAX_DANGEROUS_TOOL_PER_SESSION} for dangerous tools). Start a new session if more calls are needed.`,
+          };
+        }
+
+        // Check: total dangerous tool calls across all dangerous tools
+        if (isDangerous) {
+          const totalDangerous = [...DANGEROUS_TOOLS].reduce(
+            (sum, t) => sum + (state.perToolCounts[t] || 0), 0,
+          );
+          if (totalDangerous > MAX_DANGEROUS_TOTAL_PER_SESSION) {
+            state.totalBlocked++;
+            log.warn(`Rate limiter: total dangerous tool calls exceeded (${totalDangerous}/${MAX_DANGEROUS_TOTAL_PER_SESSION})`);
+            return {
+              block: true,
+              blockReason: `Rate limit: ${totalDangerous} total dangerous tool calls this session (max: ${MAX_DANGEROUS_TOTAL_PER_SESSION}). Start a new session.`,
+            };
+          }
         }
 
         // Check: consecutive same-tool limit
@@ -172,7 +198,7 @@ export function createRateLimiterPlugin(): JarvisPluginDefinition {
           log.warn(`Rate limiter: blocked ${toolName} (${state.consecutiveSameToolCount} consecutive calls)`);
           return {
             block: true,
-            blockReason: `Rate limit: ${toolName} called ${state.consecutiveSameToolCount} times consecutively (max: ${config.maxConsecutiveSameToolCalls}). Use rate_limiter_reset to clear if this is intentional.`,
+            blockReason: `Rate limit: ${toolName} called ${state.consecutiveSameToolCount} times consecutively (max: ${config.maxConsecutiveSameToolCalls}). You are likely in a loop — stop and report the issue.`,
           };
         }
 
@@ -183,7 +209,7 @@ export function createRateLimiterPlugin(): JarvisPluginDefinition {
           log.warn(`Rate limiter: blocked (${state.toolCallsThisMinute}/min exceeds ${config.maxToolCallsPerMinute}/min)`);
           return {
             block: true,
-            blockReason: `Rate limit: ${state.toolCallsThisMinute} tool calls this minute (max: ${config.maxToolCallsPerMinute}). Wait or use rate_limiter_reset.`,
+            blockReason: `Rate limit: ${state.toolCallsThisMinute} tool calls this minute (max: ${config.maxToolCallsPerMinute}). You are calling tools too fast — slow down.`,
           };
         }
 
@@ -194,7 +220,7 @@ export function createRateLimiterPlugin(): JarvisPluginDefinition {
           log.warn(`Rate limiter: session tool call limit reached (${state.toolCallsThisSession})`);
           return {
             block: true,
-            blockReason: `Rate limit: ${state.toolCallsThisSession} tool calls this session (max: ${config.maxToolCallsPerSession}).`,
+            blockReason: `Rate limit: ${state.toolCallsThisSession} tool calls this session (max: ${config.maxToolCallsPerSession}). Start a new session.`,
           };
         }
 
@@ -229,11 +255,18 @@ export function createRateLimiterPlugin(): JarvisPluginDefinition {
 
       // Prompt section
       api.registerPromptSection({
-        title: 'Rate Limits',
+        title: 'Rate Limits & Loop Prevention',
         content: [
-          'Rate limiting is active to prevent runaway operations.',
+          'CRITICAL: Rate limiting is active. These limits CANNOT be reset — they are hard enforced.',
           `Limits: ${config.maxToolCallsPerMinute}/min, ${config.maxToolCallsPerSession}/session, ${config.maxConsecutiveSameToolCalls} consecutive same-tool.`,
-          'If blocked, use `rate_limiter_status` to check or `rate_limiter_reset` to clear.',
+          `Dangerous tools (ssh_exec, exec, message_agent, computer): max ${MAX_DANGEROUS_TOOL_PER_SESSION} calls each, ${MAX_DANGEROUS_TOTAL_PER_SESSION} total.`,
+          '',
+          'ANTI-LOOP RULES:',
+          '- If a tool call fails, do NOT retry the same call more than 2 times. After 2 failures, STOP and report the error.',
+          '- If you are repeating similar tool calls, STOP and think whether you are in a loop.',
+          '- NEVER call ssh_exec or exec repeatedly on the same machine without a clear, different purpose each time.',
+          '- If blocked by rate limiter, STOP immediately. Do NOT try to work around it.',
+          '- Use `rate_limiter_status` to check your current usage if unsure.',
         ].join('\n'),
         priority: -15,
       });

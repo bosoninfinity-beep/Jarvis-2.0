@@ -1,3 +1,4 @@
+import { createLogger } from '@jarvis/shared';
 import type { AgentTool, ToolContext, ToolResult } from '../base.js';
 import { createToolResult, createErrorResult } from '../base.js';
 import { TwitterClient, type TwitterConfig } from './platforms/twitter.js';
@@ -6,6 +7,18 @@ import { FacebookClient, type FacebookConfig } from './platforms/meta.js';
 import { LinkedInClient, type LinkedInConfig } from './platforms/linkedin.js';
 import { TikTokClient, type TikTokConfig } from './platforms/tiktok.js';
 import { RedditClient, type RedditConfig } from './platforms/reddit.js';
+
+const log = createLogger('tool:social:post');
+
+/** Platform text length limits — posts exceeding these will be rejected pre-API call */
+const PLATFORM_MAX_LENGTH: Record<string, number> = {
+  twitter: 280,
+  instagram: 2200,
+  facebook: 63206,
+  linkedin: 3000,
+  tiktok: 2200,
+  reddit: 40000,
+};
 
 export interface SocialToolConfig {
   readonly twitter?: TwitterConfig;
@@ -72,6 +85,17 @@ export class SocialTool implements AgentTool {
 
     if (!text) return createErrorResult('Missing required parameter: text');
 
+    // Validate text length against platform limits (skip for cross-platform 'all')
+    if (platform !== 'all') {
+      const maxLen = PLATFORM_MAX_LENGTH[platform];
+      if (maxLen && text.length > maxLen) {
+        return createErrorResult(
+          `Text too long for ${platform}: ${text.length} chars (max: ${maxLen}). ` +
+          `Shorten the text before posting.`,
+        );
+      }
+    }
+
     if (platform === 'all') {
       return this.postToAll(action, params);
     }
@@ -88,10 +112,25 @@ export class SocialTool implements AgentTool {
   }
 
   private async postToAll(action: string, params: Record<string, unknown>): Promise<ToolResult> {
+    const text = params['text'] as string;
+
+    // Pre-check: warn about text length issues per platform
+    const lengthWarnings: string[] = [];
+    for (const [platform, maxLen] of Object.entries(PLATFORM_MAX_LENGTH)) {
+      if (text.length > maxLen) {
+        lengthWarnings.push(`${platform} (${text.length}/${maxLen})`);
+      }
+    }
+    if (lengthWarnings.length > 0) {
+      log.warn(`Cross-platform post: text too long for: ${lengthWarnings.join(', ')}`);
+    }
+
+    // Build platform list — skip platforms where text exceeds limit
     const platforms = [
-      { name: 'Twitter', handler: () => this.handleTwitter(action, params) },
+      ...(this.twitter && text.length <= PLATFORM_MAX_LENGTH['twitter']! ? [{ name: 'Twitter', handler: () => this.handleTwitter(action, params) }] : []),
+      ...(this.twitter && text.length > PLATFORM_MAX_LENGTH['twitter']! ? [{ name: 'Twitter', handler: async () => createErrorResult(`Text too long (${text.length}/${PLATFORM_MAX_LENGTH['twitter']} chars). Shorten or use thread action.`) }] : []),
       { name: 'Facebook', handler: () => this.handleFacebook(action, params) },
-      { name: 'LinkedIn', handler: () => this.handleLinkedIn(action, params) },
+      ...(text.length <= PLATFORM_MAX_LENGTH['linkedin']! ? [{ name: 'LinkedIn', handler: () => this.handleLinkedIn(action, params) }] : [{ name: 'LinkedIn', handler: async () => createErrorResult(`Text too long (${text.length}/${PLATFORM_MAX_LENGTH['linkedin']} chars)`) }]),
       { name: 'Instagram', handler: () => this.handleInstagram(action, params) },
       ...(this.tiktok ? [{ name: 'TikTok', handler: () => this.handleTikTok(action, params) }] : []),
       ...(this.reddit && params['subreddit'] ? [{ name: 'Reddit', handler: () => this.handleReddit(action, params) }] : []),

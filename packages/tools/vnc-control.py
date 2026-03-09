@@ -4,7 +4,7 @@ VNC Control - Send mouse/keyboard events to a VNC server.
 Uses RFB protocol with VNCAuth (type 2).
 
 Usage:
-  python3 vnc-control.py HOST PORT PASSWORD ACTION [PARAMS...]
+  echo "PASSWORD" | python3 vnc-control.py HOST PORT ACTION [PARAMS...]
 
 Actions:
   screenshot [OUTPUT_FILE]   - Capture framebuffer (default: base64 to stdout)
@@ -309,15 +309,18 @@ class VNCConnection:
 
 
 def main():
-    if len(sys.argv) < 5:
-        print("Usage: vnc-control.py HOST PORT PASSWORD ACTION [PARAMS...]", file=sys.stderr)
+    if len(sys.argv) < 4:
+        print("Usage: vnc-control.py HOST PORT ACTION [PARAMS...]", file=sys.stderr)
+        print("       Password is read from stdin (one line).", file=sys.stderr)
         sys.exit(1)
 
     host = sys.argv[1]
     port = int(sys.argv[2])
-    password = sys.argv[3]
-    action = sys.argv[4].lower()
-    params = sys.argv[5:]
+    action = sys.argv[3].lower()
+    params = sys.argv[4:]
+
+    # Read password from stdin (secure — not visible in ps output)
+    password = sys.stdin.readline().rstrip('\n') if not sys.stdin.isatty() else ''
 
     vnc = VNCConnection(host, port, password)
     try:

@@ -235,11 +235,20 @@ KEY COMBOS: Use key_combo with format like "cmd+c", "cmd+shift+s", "ctrl+a"`,
 
       log.info(`VNC: ${action} ${params.join(' ')}`);
 
+      // Pass VNC password via stdin (not env var) to prevent exposure in ps output
       const proc = spawn('python3', args, {
         timeout: action === 'screenshot' ? SCREENSHOT_TIMEOUT : ACTION_TIMEOUT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, VNC_PASSWORD: host.vncPassword },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: process.env,
       });
+
+      // Write password to stdin and close it immediately
+      if (host.vncPassword && proc.stdin) {
+        proc.stdin.write(host.vncPassword);
+        proc.stdin.end();
+      } else if (proc.stdin) {
+        proc.stdin.end();
+      }
 
       let stdout = '';
       let stderr = '';

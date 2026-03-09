@@ -23,9 +23,9 @@ import { join } from 'node:path';
 
 const log = createLogger('agent:runner');
 
-const MAX_TOOL_ROUNDS = 15;
+const MAX_TOOL_ROUNDS = 10;
 const MAX_CONSECUTIVE_ERRORS = 5;
-const TOOL_TIMEOUT_MS = 300_000; // 5 minutes
+const TOOL_TIMEOUT_MS = 120_000; // 2 minutes (was 5 — prevents long-hanging tools)
 /** Default max output tokens per LLM request.
  *  Claude Opus 4.6: 32k, Sonnet 4.6: 64k output tokens max. */
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
@@ -743,9 +743,11 @@ export class AgentRunner {
       const expired = this.taskQueue.filter(t => now - t.queuedAt > AgentRunner.TASK_QUEUE_TTL_MS);
       for (const stale of expired) {
         log.warn(`Expiring stale queued task ${stale.taskId} (queued ${Math.round((now - stale.queuedAt) / 1000)}s ago)`);
-        this.nats.publishResult(stale.taskId, { success: false, output: 'Task expired while queued (TTL exceeded)' }).catch((err) => {
+        try {
+          await this.nats.publishResult(stale.taskId, { success: false, output: 'Task expired while queued (TTL exceeded)' });
+        } catch (err) {
           log.warn(`Failed to publish expiry result for ${stale.taskId}: ${(err as Error).message}`);
-        });
+        }
       }
       this.taskQueue = this.taskQueue.filter(t => now - t.queuedAt <= AgentRunner.TASK_QUEUE_TTL_MS);
 

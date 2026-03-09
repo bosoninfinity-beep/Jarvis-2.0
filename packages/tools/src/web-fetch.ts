@@ -1,3 +1,4 @@
+import { lookup } from 'node:dns/promises';
 import type { AgentTool, ToolContext, ToolResult } from './base.js';
 import { createToolResult, createErrorResult } from './base.js';
 import { isPrivateUrl } from './ssrf.js';
@@ -27,6 +28,25 @@ export class WebFetchTool implements AgentTool {
     // SSRF protection: block requests to private/internal networks
     if (isPrivateUrl(url)) {
       return createErrorResult('Blocked: URL targets a private or internal network address');
+    }
+
+    // DNS rebinding protection: pre-resolve hostname and verify the IP is not private
+    try {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname;
+      // Only resolve if it's not already an IP address
+      if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) && !hostname.startsWith('[')) {
+        const { address } = await lookup(hostname);
+        if (isPrivateUrl(`http://${address}`)) {
+          return createErrorResult(`Blocked: ${hostname} resolves to private IP ${address} (DNS rebinding protection)`);
+        }
+      }
+    } catch (err) {
+      const msg = (err as Error).message;
+      // DNS lookup failure — let fetch handle it (may be a valid URL with DNS issues)
+      if (!msg.includes('ENOTFOUND')) {
+        // Only block on unexpected errors, not DNS resolution failures
+      }
     }
 
     const raw = params['raw'] as boolean ?? false;

@@ -60,7 +60,7 @@ export function createSocialSchedulerPlugin(): JarvisPluginDefinition {
           'Use `social_schedule` tool with action "schedule" to queue posts for future publishing.',
           'Use `social_schedule` with action "list" to see upcoming scheduled posts.',
           'The scheduler checks for due posts every 60 seconds in the background.',
-          'Use `social_generate_content` to generate AI-powered content optimized for each platform.',
+          'You ARE the content writer — write posts directly with platform constraints in mind (Twitter 280 chars, Instagram 2200, LinkedIn 3000, TikTok 2200).',
         ].join('\n'),
         priority: 5,
       });
