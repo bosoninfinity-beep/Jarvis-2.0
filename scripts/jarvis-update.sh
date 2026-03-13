@@ -121,7 +121,7 @@ fi
 
 # ─── Sync to Remote Agents ───────────────────────────────────────────────────
 
-SSH_KEY="$HOME/.ssh/id_ed25519_jarvis"
+SSH_KEY="$HOME/.ssh/id_ed25519"
 if [[ -f "$SSH_KEY" ]]; then
   log "Syncing updated code to remote agents..."
   write_status "running" "Syncing to remote agents..." "$PREV_HEAD" "$NEW_HEAD"
@@ -131,7 +131,7 @@ if [[ -f "$SSH_KEY" ]]; then
   SMITH_IP="${SMITH_IP:-${ALPHA_IP:-192.168.1.37}}"
   SMITH_USER="${SMITH_USER:-${ALPHA_USER:-agent_smith}}"
   JOHNY_IP="${JOHNY_IP:-${BETA_IP:-192.168.1.253}}"
-  JOHNY_USER="${JOHNY_USER:-${BETA_USER:-agent_johny}}"
+  JOHNY_USER="${JOHNY_USER:-${BETA_USER:-kamilpadula}}"
 
   for AGENT_USER_HOST in "${SMITH_USER}@${SMITH_IP}" "${JOHNY_USER}@${JOHNY_IP}"; do
     AGENT_USER="${AGENT_USER_HOST%%@*}"
