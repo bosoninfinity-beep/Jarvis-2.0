@@ -16,6 +16,7 @@ import { CronSchedulerTool, type CronSchedulerConfig } from './integrations/cron
 import { AppleCalendarTool, type AppleCalendarConfig } from './integrations/apple-calendar.js';
 import { SocialTool, SocialAnalyticsTool, type SocialToolConfig } from './social/social-tool.js';
 import { SocialSchedulerTool } from './social/scheduler.js';
+import { SocialEngagementTool } from './social/engagement.js';
 
 import { ImageGenTool } from './image-gen.js';
 import { MediaGenTool, type MediaGenConfig } from './media-gen.js';
@@ -149,6 +150,7 @@ export class ToolRegistry {
       this.register(new SocialTool(config.socialConfig));
       this.register(new SocialAnalyticsTool(config.socialConfig));
       this.register(new SocialSchedulerTool());
+      this.register(new SocialEngagementTool(config.socialConfig));
       // NOTE: SocialContentGeneratorTool removed — the agent IS Claude and writes
       // content directly with full context (brand voice, conversation history).
       // A separate Haiku API call was redundant, slower, and context-blind.

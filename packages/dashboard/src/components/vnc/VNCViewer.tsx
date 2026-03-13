@@ -163,7 +163,15 @@ export function VNCViewer({ wsUrl, username, password, id, target, viewOnly = fa
       if (username) creds.username = username;
       if (password) creds.password = password;
 
-      const rfb = new RFB(containerRef.current, wsUrl, {
+      // Append auth token for gateway WS proxy (/ws/vnc/*)
+      let finalWsUrl = wsUrl;
+      const gatewayToken = localStorage.getItem('jarvis_gateway_token');
+      if (gatewayToken && wsUrl.includes('/ws/vnc/')) {
+        const sep = wsUrl.includes('?') ? '&' : '?';
+        finalWsUrl = `${wsUrl}${sep}token=${gatewayToken}`;
+      }
+
+      const rfb = new RFB(containerRef.current, finalWsUrl, {
         credentials: Object.keys(creds).length > 0 ? creds : undefined,
         wsProtocols: ['binary'],
       }) as unknown as RFBInstance;

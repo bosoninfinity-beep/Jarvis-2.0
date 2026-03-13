@@ -1,5 +1,6 @@
 import { createLogger } from '@jarvis/shared';
 import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import type {
   LLMProvider, ChatRequest, ChatResponse, ChatChunk,
   ModelInfo, ContentBlock, TokenUsage, Message,
@@ -29,34 +30,68 @@ export interface AnthropicProviderConfig {
   authMode?: AnthropicAuthMode;
 }
 
-/** Read OAuth access token from Claude CLI's macOS Keychain credentials */
-function readClaudeCliToken(): { accessToken: string; expiresAt: number; refreshToken: string } | null {
-  if (process.platform !== 'darwin') {
-    log.warn('Claude CLI auth is only supported on macOS (Keychain)');
-    return null;
-  }
+/** Read OAuth access token from Claude CLI's macOS Keychain credentials or env var fallback */
+function parseOAuthCreds(raw: string): { accessToken: string; expiresAt: number; refreshToken: string } | null {
   try {
-    const raw = execSync(
-      'security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null',
-      { encoding: 'utf-8', timeout: 5000 },
-    ).trim();
     const creds = JSON.parse(raw) as {
       claudeAiOauth?: { accessToken?: string; expiresAt?: number; refreshToken?: string };
     };
     const oauth = creds.claudeAiOauth;
-    if (!oauth?.accessToken) {
-      log.warn('Claude CLI credentials found but no accessToken present');
-      return null;
-    }
+    if (!oauth?.accessToken) return null;
     return {
       accessToken: oauth.accessToken,
       expiresAt: oauth.expiresAt ?? 0,
       refreshToken: oauth.refreshToken ?? '',
     };
-  } catch (err) {
-    log.warn(`Failed to read Claude CLI token from Keychain: ${(err as Error).message}`);
+  } catch {
     return null;
   }
+}
+
+function readClaudeCliToken(): { accessToken: string; expiresAt: number; refreshToken: string } | null {
+  // Source 1: CLAUDE_OAUTH_CREDENTIALS env var (injected by JarvisApp at startup)
+  const envCreds = process.env['CLAUDE_OAUTH_CREDENTIALS'];
+  if (envCreds) {
+    const parsed = parseOAuthCreds(envCreds);
+    if (parsed && parsed.expiresAt > Date.now()) {
+      log.info('Using OAuth token from CLAUDE_OAUTH_CREDENTIALS env var');
+      return parsed;
+    }
+  }
+
+  // Source 2: NAS file (synced from Mac Studio Keychain, refreshes without agent restart)
+  const nasMount = process.env['JARVIS_NAS_MOUNT'];
+  if (nasMount) {
+    try {
+      const oauthPath = `${nasMount}/config/claude-oauth.json`;
+      const raw = readFileSync(oauthPath, 'utf-8');
+      const parsed = parseOAuthCreds(raw);
+      if (parsed && parsed.expiresAt > Date.now()) {
+        log.info('Using OAuth token from NAS (claude-oauth.json)');
+        return parsed;
+      }
+    } catch { /* NAS file not available */ }
+  }
+
+  // Source 3: macOS Keychain (works on Mac Studio where claude login was done)
+  if (process.platform === 'darwin') {
+    try {
+      const raw = execSync(
+        'security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null',
+        { encoding: 'utf-8', timeout: 5000 },
+      ).trim();
+      const parsed = parseOAuthCreds(raw);
+      if (parsed) {
+        log.info('Using OAuth token from macOS Keychain');
+        return parsed;
+      }
+    } catch (err) {
+      log.warn(`Failed to read Claude CLI token from Keychain: ${(err as Error).message}`);
+    }
+  }
+
+  log.warn('No OAuth token available (env var, NAS, Keychain all failed)');
+  return null;
 }
 
 export class AnthropicProvider implements LLMProvider {

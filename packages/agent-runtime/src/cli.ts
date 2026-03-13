@@ -54,7 +54,7 @@ const nasMount = (() => {
 })();
 const workspace = process.env['WORKSPACE_PATH'] ?? `${nasMount}/workspace/projects`;
 const defaultModel = process.env['DEFAULT_MODEL'] ?? 'claude-opus-4-6';
-let anthropicAuthMode = (process.env['ANTHROPIC_AUTH_MODE'] ?? 'api-key') as 'api-key' | 'claude-cli';
+// Claude CLI only — Max subscription, no API keys
 
 // SSH host config for remote machine control
 const sshAlphaHost = process.env['SSH_ALPHA_HOST'] ?? process.env['VNC_ALPHA_HOST'];
@@ -117,7 +117,8 @@ const redditClientId = process.env['REDDIT_CLIENT_ID'];
 
 // Media generation API keys from env
 const fluxApiKey = process.env['FLUX_API_KEY'];
-const klingApiKey = process.env['KLING_API_KEY'];
+const klingAccessKey = process.env['KLING_ACCESS_KEY'];
+const klingSecretKey = process.env['KLING_SECRET_KEY'];
 const elevenLabsApiKey = process.env['ELEVENLABS_API_KEY'];
 const heygenApiKey = process.env['HEYGEN_API_KEY'];
 const runwayApiKey = process.env['RUNWAY_API_KEY'];
@@ -130,11 +131,6 @@ const CAPABILITIES: Record<string, string[]> = {
 };
 
 async function main(): Promise<void> {
-  // Validate critical env vars
-  if (!process.env['ANTHROPIC_API_KEY'] && anthropicAuthMode === 'api-key') {
-    log.error('ANTHROPIC_API_KEY is not set and auth mode is api-key — agent cannot call LLM');
-    process.exit(1);
-  }
   if (!natsUrl || natsUrl === 'nats://localhost:4222') {
     log.warn('NATS_URL not explicitly set — using default localhost. Agent may not reach the gateway.');
   }
@@ -148,7 +144,7 @@ async function main(): Promise<void> {
   }
   log.info(`NAS: ${nasMount}`);
   log.info(`Model: ${defaultModel}`);
-  log.info(`Auth mode: ${anthropicAuthMode}${anthropicAuthMode === 'claude-cli' ? ' (Claude Max subscription)' : ' (API key)'}`);
+  log.info(`Auth mode: Claude Max subscription (Claude CLI only)`);
 
   // Initialize tools
   const hasSshHosts = Object.keys(sshHosts).length > 0;
@@ -250,13 +246,13 @@ async function main(): Promise<void> {
     },
     enableSocial,
     socialConfig,
-    anthropicApiKey: process.env['ANTHROPIC_API_KEY'],
     enableImageGen: true,
     openaiApiKey: process.env['OPENAI_API_KEY'],
-    enableMediaGen: !!(fluxApiKey || klingApiKey || elevenLabsApiKey || heygenApiKey),
-    mediaGenConfig: (fluxApiKey || klingApiKey || elevenLabsApiKey || heygenApiKey) ? {
+    enableMediaGen: !!(fluxApiKey || klingAccessKey || elevenLabsApiKey || heygenApiKey),
+    mediaGenConfig: (fluxApiKey || klingAccessKey || elevenLabsApiKey || heygenApiKey) ? {
       fluxApiKey,
-      klingApiKey,
+      klingAccessKey,
+      klingSecretKey,
       elevenLabsApiKey,
       heygenApiKey,
       runwayApiKey,
@@ -274,10 +270,7 @@ async function main(): Promise<void> {
         activeModel = savedConfig.config.model;
         log.info(`Model override from NAS config: ${activeModel}`);
       }
-      if (savedConfig.config?.authMode === 'api-key' || savedConfig.config?.authMode === 'claude-cli') {
-        anthropicAuthMode = savedConfig.config.authMode;
-        log.info(`Auth mode override from NAS config: ${anthropicAuthMode}`);
-      }
+      // Auth mode is always claude-cli (Max subscription) — no override needed
     }
   } catch { /* ignore, use default */ }
 
@@ -296,8 +289,6 @@ async function main(): Promise<void> {
     tools,
     socialConfig: socialConfig as Record<string, unknown> | undefined,
     llm: {
-      anthropicApiKey: process.env['ANTHROPIC_API_KEY'],
-      anthropicAuthMode: anthropicAuthMode,
       openaiApiKey: process.env['OPENAI_API_KEY'],
       googleApiKey: process.env['GOOGLE_AI_API_KEY'],
       ollamaBaseUrl: process.env['OLLAMA_BASE_URL'],

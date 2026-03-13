@@ -20,6 +20,11 @@ const CHANNEL_DEFAULTS: Record<string, Record<string, unknown>> = {
     jarvisMode: true,
     notifyOnMessage: true,
     autoConnect: false,
+    authorizedJids: [],
+    notificationJid: '',
+    defaultAgent: 'jarvis',
+    enableCommands: true,
+    maxMessageLength: 4000,
   },
   telegram: {
     botToken: process.env['TELEGRAM_BOT_TOKEN'] ?? '',

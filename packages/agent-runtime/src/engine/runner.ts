@@ -32,8 +32,9 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
 /** Approximate char budget for the full prompt (system + tools + messages).
  *  Claude CLI's `-p` mode pipes everything as a single string; keeping it
  *  well under the 200k-token context avoids "Prompt is too long" errors.
- *  ~150k chars ≈ ~40k tokens, leaving room for system prompt + tool defs. */
-const MAX_PROMPT_CHARS = 100_000;
+ *  ~150k chars ≈ ~40k tokens, leaving room for system prompt + tool defs.
+ *  Bumped to 150k for Marketing Hub v4 (75k prompt + agent template + core). */
+const MAX_PROMPT_CHARS = 150_000;
 
 /**
  * Replace base64 image data in older tool results with a short text placeholder.
@@ -160,25 +161,26 @@ function compactWriteToolUse(messages: Message[], keepRecent = 4): Message[] {
 function estimateMessagesSize(msgs: Message[], systemPromptLen: number, toolDefsLen: number): number {
   let size = systemPromptLen + toolDefsLen;
   for (const m of msgs) {
+    if (!m.content) continue;
     if (typeof m.content === 'string') {
       size += m.content.length;
-    } else {
+    } else if (Array.isArray(m.content)) {
       for (const block of m.content) {
         switch (block.type) {
           case 'text':
-            size += block.text.length;
+            size += block.text?.length ?? 0;
             break;
           case 'thinking':
-            size += block.thinking.length;
+            size += block.thinking?.length ?? 0;
             break;
           case 'tool_result':
-            size += typeof block.content === 'string' ? block.content.length : JSON.stringify(block.content).length;
+            size += block.content == null ? 0 : (typeof block.content === 'string' ? block.content.length : JSON.stringify(block.content).length);
             break;
           case 'tool_use':
-            size += JSON.stringify(block.input).length;
+            size += block.input ? JSON.stringify(block.input).length : 0;
             break;
           default:
-            size += JSON.stringify(block).length;
+            try { size += JSON.stringify(block).length; } catch { /* skip */ }
         }
       }
     }
@@ -226,6 +228,7 @@ function truncateBlockContent(block: Record<string, unknown>, maxLen: number): R
  * Preserves assistant/user message structure and tool_use/tool_result pairing.
  */
 function shrinkMessage(msg: Message, aggressive: boolean): Message {
+  if (!msg.content) return msg;
   if (typeof msg.content === 'string') {
     const limit = aggressive ? 2_000 : 6_000;
     if (msg.content.length > limit) {
@@ -233,6 +236,7 @@ function shrinkMessage(msg: Message, aggressive: boolean): Message {
     }
     return msg;
   }
+  if (!Array.isArray(msg.content)) return msg;
 
   let blocks = msg.content as Array<Record<string, unknown>>;
   const maxLen = aggressive ? 2_000 : (msg.role === 'assistant' ? MAX_TOOL_USE_CHARS : MAX_TOOL_RESULT_CHARS);
@@ -815,7 +819,20 @@ export class AgentRunner {
         }
       }
 
-      const systemPrompt = await this.buildEnhancedSystemPrompt();
+      let systemPrompt = await this.buildEnhancedSystemPrompt();
+
+      // Inject channel-specific instructions when message comes from an external channel
+      if (msg.metadata?.source === 'whatsapp') {
+        systemPrompt += `\n\n## CRITICAL: WhatsApp Channel Response Rules
+
+This chat message arrived from WhatsApp. Your text response will be automatically delivered back to the user on WhatsApp. Follow these rules STRICTLY:
+
+1. **NEVER use the imessage tool** to reply — your text response IS the reply. Do NOT send iMessages or SMS.
+2. **NEVER use any messaging tool** (imessage, send_sms, etc.) to respond to this conversation.
+3. **Just respond with text.** Whatever you write as your final response will be sent to WhatsApp automatically.
+4. **You CAN and SHOULD use other tools** (browser, terminal, file operations, screenshots, etc.) to fulfill the user's request — just don't use messaging tools for the reply.
+5. **Execute the user's request** — if they ask you to open YouTube, run a command, take a screenshot, etc., DO IT using the appropriate tools, then describe what you did in your text response.`;
+      }
 
       await this.nats.updateStatus('busy', undefined, `Chat: ${msg.content.slice(0, 60)}`);
       log.info(`Processing chat from ${msg.from}: ${msg.content.slice(0, 100)}`);
@@ -1579,8 +1596,9 @@ export class AgentRunner {
   }
 
   private logRound(round: number, response: ChatResponse, usage: UsageAccumulator): void {
-    const toolCount = response.content.filter((b) => b.type === 'tool_use').length;
-    const textLength = response.content
+    const blocks = response.content ?? [];
+    const toolCount = blocks.filter((b) => b.type === 'tool_use').length;
+    const textLength = blocks
       .filter((b): b is TextBlock => b.type === 'text')
       .reduce((sum, b) => sum + (b.text?.length ?? 0), 0);
 

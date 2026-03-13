@@ -72,7 +72,7 @@ export class ProtocolHandler {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.error(`Method ${req.method} failed`, { error: message, clientId });
-      this.sendError(clientId, req.id, ErrorCode.INTERNAL_ERROR, 'Internal server error');
+      this.sendError(clientId, req.id, ErrorCode.INTERNAL_ERROR, message);
     }
   }
 

@@ -206,11 +206,36 @@ class ServiceManager {
                 }
             }
 
-            // Detect Thunderbolt IPs for remote agent NATS URLs
+            // Detect and fix Thunderbolt IPs (local + remote agents)
             self.thunderboltIPs = self.detectThunderboltIPs()
             if let firstIP = self.thunderboltIPs.first {
                 gwEnv["MASTER_IP_THUNDERBOLT"] = firstIP
-                NSLog("Gateway MASTER_IP_THUNDERBOLT=\(firstIP) (all TB IPs: \(self.thunderboltIPs))")
+                NSLog("Gateway MASTER_IP_THUNDERBOLT=\(firstIP)")
+            }
+            self.fixThunderboltNetmask()
+
+            // Dynamically detect remote agent TB IPs (via SSH on LAN)
+            // This replaces stale VNC_*_HOST_THUNDERBOLT values from jarvis.env
+            let smithHost = self.envValue("SMITH_IP", from: envContent)
+            let smithUser = self.envValue("SMITH_USER", from: envContent)
+            let smithPass = self.envValue("SMITH_PASS", from: envContent)
+            let johnyHost = self.envValue("JOHNY_IP", from: envContent)
+            let johnyUser = self.envValue("JOHNY_USER", from: envContent)
+            let johnyPass = self.envValue("JOHNY_PASS", from: envContent)
+
+            if !smithHost.isEmpty && !smithUser.isEmpty {
+                if let smithTB = self.detectRemoteThunderboltIP(host: smithHost, user: smithUser, password: smithPass) {
+                    gwEnv["VNC_ALPHA_HOST_THUNDERBOLT"] = smithTB
+                    NSLog("Smith TB IP (live): \(smithTB)")
+                    self.fixRemoteThunderboltNetmask(host: smithHost, user: smithUser, password: smithPass, tbIP: smithTB)
+                }
+            }
+            if !johnyHost.isEmpty && !johnyUser.isEmpty {
+                if let johnyTB = self.detectRemoteThunderboltIP(host: johnyHost, user: johnyUser, password: johnyPass) {
+                    gwEnv["VNC_BETA_HOST_THUNDERBOLT"] = johnyTB
+                    NSLog("Johny TB IP (live): \(johnyTB)")
+                    self.fixRemoteThunderboltNetmask(host: johnyHost, user: johnyUser, password: johnyPass, tbIP: johnyTB)
+                }
             }
 
             let nodeBin = self.findSystemNode()
@@ -248,11 +273,36 @@ class ServiceManager {
 
     // ─── Agent Auto-Start ──────────────────────────────────────
 
+    /// Read Claude CLI OAuth credentials from macOS Keychain (Mac Studio only)
+    private func readClaudeOAuthCredentials() -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-a", NSUserName(), "-w"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let creds = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !creds.isEmpty {
+                    NSLog("Claude OAuth credentials read from Keychain (\(creds.count) chars)")
+                    return creds
+                }
+            }
+        } catch {
+            NSLog("Failed to read Claude OAuth from Keychain: \(error)")
+        }
+        return nil
+    }
+
     func startAgents() {
         let envPath = "\(dataDir)/jarvis.env"
         let envContent = (try? String(contentsOfFile: envPath, encoding: .utf8)) ?? ""
 
-        NSLog("Starting agents...")
+        // LLM: Claude CLI only (Max subscription) — no API keys or OAuth needed
+        NSLog("Starting agents (LLM: Claude CLI)...")
 
         // Start orchestrator locally (from monorepo if available)
         startOrchestrator(envContent: envContent)
@@ -435,7 +485,6 @@ class ServiceManager {
             export NATS_URL=nats://192.168.1.33:4222 && \
             export NATS_TOKEN=\(natsToken) && \
             export JARVIS_NAS_MOUNT=$REMOTE_NAS && \
-            export ANTHROPIC_AUTH_MODE=claude-cli && \
             security unlock-keychain -p \(password) ~/Library/Keychains/login.keychain-db 2>/dev/null; \
             exec ./node_modules/.bin/tsx packages/agent-runtime/src/cli.ts
             """
@@ -562,6 +611,66 @@ class ServiceManager {
             "cd ~/.jarvis/node_modules && [ ! -e ws ] && ln -sf .pnpm/ws@8.19.0/node_modules/ws ws; true")
     }
 
+    /// Run SSH command and return stdout (for reading remote values like TB IP)
+    private func runSSHCommandWithOutput(host: String, user: String, password: String, command: String) -> String {
+        let escapedPassword = password
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "[", with: "\\[")
+            .replacingOccurrences(of: "]", with: "\\]")
+        let escapedCommand = command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "[", with: "\\[")
+            .replacingOccurrences(of: "]", with: "\\]")
+        let expectScript = """
+            log_user 0
+            set timeout 10
+            spawn ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \(user)@\(host) "\(escapedCommand)"
+            expect {
+                "*assword*" { send "\(escapedPassword)\\r"; exp_continue }
+                eof {}
+            }
+            """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/expect")
+        process.arguments = ["-c", expectScript]
+        process.standardInput = FileHandle.nullDevice
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.availableData
+            return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        } catch {
+            return ""
+        }
+    }
+
+    /// Detect Thunderbolt IP of a remote agent via SSH (reads bridge0 inet address)
+    private func detectRemoteThunderboltIP(host: String, user: String, password: String) -> String? {
+        let output = runSSHCommandWithOutput(host: host, user: user, password: password,
+            command: "ifconfig bridge0 2>/dev/null | grep 'inet ' | awk '{print $2}'")
+        // Output may contain "spawn ssh..." noise — extract just the IP
+        for line in output.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("169.254.") {
+                return trimmed
+            }
+        }
+        return nil
+    }
+
+    /// Fix bridge0 netmask on a remote machine from /32 to /16 via SSH
+    private func fixRemoteThunderboltNetmask(host: String, user: String, password: String, tbIP: String) {
+        runSSHCommand(host: host, user: user, password: password,
+            command: "echo '\(password)' | sudo -S ifconfig bridge0 \(tbIP) netmask 255.255.0.0 2>/dev/null; true")
+    }
+
     private func runSSHCommand(host: String, user: String, password: String, command: String) {
         // Escape special characters for Tcl/expect script
         // Password: escape Tcl specials inside double quotes ($, [, ], \, ")
@@ -677,6 +786,27 @@ class ServiceManager {
             }
         }
         return result == 0
+    }
+
+    /// Fix bridge0 netmask from /32 to /16 so Thunderbolt link-local IPs can communicate
+    private func fixThunderboltNetmask() {
+        guard let firstIP = self.thunderboltIPs.first else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
+        process.arguments = ["bridge0", firstIP, "netmask", "255.255.0.0"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                NSLog("Fixed bridge0 netmask to /16 for \(firstIP)")
+            } else {
+                NSLog("bridge0 netmask fix failed (status \(process.terminationStatus)) — may need sudo")
+            }
+        } catch {
+            NSLog("Failed to fix bridge0 netmask: \(error)")
+        }
     }
 
     /// Detect all Thunderbolt link-local IPs (bridge0, en6, en7, etc.)

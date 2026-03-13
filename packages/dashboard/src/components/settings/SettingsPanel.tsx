@@ -472,7 +472,7 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
                     </span>
                   </div>
 
-                  <InfoRow label="Anthropic" value="ANTHROPIC_API_KEY" />
+                  <InfoRow label="Claude" value="CLI (Max subscription)" />
                   <InfoRow label="OpenAI" value="OPENAI_API_KEY" />
                   <InfoRow label="Google AI" value="GOOGLE_AI_API_KEY" />
                   <InfoRow label="OpenRouter" value="OPENROUTER_API_KEY" />

@@ -153,14 +153,28 @@ export class SocialTool implements AgentTool {
   private async handleTwitter(action: string, params: Record<string, unknown>): Promise<ToolResult> {
     if (!this.twitter) return createErrorResult('Twitter not configured');
     const text = params['text'] as string;
+    const mediaUrl = params['media_url'] as string | undefined;
 
     switch (action) {
-      case 'post': return this.twitter.postTweet(text);
+      case 'post':
+      case 'photo':
+      case 'video': {
+        // If media_url is a local file path, upload and attach
+        if (mediaUrl && (mediaUrl.startsWith('/') || mediaUrl.startsWith('~'))) {
+          return this.twitter.postTweetWithMedia(text, mediaUrl);
+        }
+        return this.twitter.postTweet(text);
+      }
       case 'thread': {
         const thread = params['thread'] as string[] ?? [text];
         return this.twitter.postThread(thread);
       }
-      default: return this.twitter.postTweet(text);
+      default: {
+        if (mediaUrl && (mediaUrl.startsWith('/') || mediaUrl.startsWith('~'))) {
+          return this.twitter.postTweetWithMedia(text, mediaUrl);
+        }
+        return this.twitter.postTweet(text);
+      }
     }
   }
 

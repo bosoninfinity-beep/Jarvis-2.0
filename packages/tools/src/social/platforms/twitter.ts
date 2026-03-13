@@ -1,8 +1,10 @@
 import { createHmac, randomBytes } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
 import type { ToolResult } from '../../base.js';
 import { createToolResult, createErrorResult } from '../../base.js';
 
 const TWITTER_API_V2 = 'https://api.twitter.com/2';
+const TWITTER_UPLOAD_V1 = 'https://upload.twitter.com/1.1/media/upload.json';
 
 export interface TwitterConfig {
   readonly apiKey: string;
@@ -17,6 +19,8 @@ export interface TwitterConfig {
  * Handles posting tweets, threads, reading timelines, and analytics.
  */
 export class TwitterClient {
+  private userId: string | null = null;
+
   constructor(private config: TwitterConfig) {}
 
   async postTweet(text: string, options?: {
@@ -181,6 +185,181 @@ export class TwitterClient {
     }
   }
 
+  /**
+   * Upload media (image/video) to Twitter via chunked upload API v1.1.
+   * Returns the media_id_string to attach to a tweet.
+   */
+  async uploadMedia(filePath: string): Promise<{ mediaId: string } | { error: string }> {
+    try {
+      const fileData = readFileSync(filePath);
+      const fileStat = statSync(filePath);
+      const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+      const isVideo = ['mp4', 'mov', 'webm'].includes(ext);
+      const mimeType = isVideo
+        ? (ext === 'mp4' ? 'video/mp4' : ext === 'mov' ? 'video/quicktime' : 'video/webm')
+        : (ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg');
+      const mediaCategory = isVideo ? 'tweet_video' : (ext === 'gif' ? 'tweet_gif' : 'tweet_image');
+
+      // INIT
+      const initParams: Record<string, string> = {
+        command: 'INIT',
+        total_bytes: String(fileStat.size),
+        media_type: mimeType,
+        media_category: mediaCategory,
+      };
+      const initUrl = TWITTER_UPLOAD_V1;
+      const initBody = new URLSearchParams(initParams).toString();
+      const initResp = await fetch(initUrl, {
+        method: 'POST',
+        headers: {
+          ...this.getOAuthHeaderOnly('POST', initUrl, initParams),
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: initBody,
+      });
+      if (!initResp.ok) {
+        return { error: `INIT failed (${initResp.status}): ${await initResp.text()}` };
+      }
+      const initData = await initResp.json() as { media_id_string: string };
+      const mediaId = initData.media_id_string;
+
+      // APPEND — send in 5MB chunks
+      const CHUNK_SIZE = 5 * 1024 * 1024;
+      for (let segment = 0; segment * CHUNK_SIZE < fileData.length; segment++) {
+        const chunk = fileData.subarray(segment * CHUNK_SIZE, (segment + 1) * CHUNK_SIZE);
+        const boundary = `----Boundary${randomBytes(8).toString('hex')}`;
+
+        // Build multipart body manually
+        const parts: Buffer[] = [];
+        const addField = (name: string, value: string) => {
+          parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+        };
+        addField('command', 'APPEND');
+        addField('media_id', mediaId);
+        addField('segment_index', String(segment));
+        parts.push(Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="media_data"\r\nContent-Transfer-Encoding: base64\r\n\r\n`,
+        ));
+        parts.push(Buffer.from(chunk.toString('base64')));
+        parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+        const body = Buffer.concat(parts);
+
+        // For APPEND with multipart, OAuth signature should NOT include body params
+        const appendResp = await fetch(initUrl, {
+          method: 'POST',
+          headers: {
+            ...this.getOAuthHeaderOnly('POST', initUrl),
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          },
+          body,
+        });
+        if (!appendResp.ok && appendResp.status !== 204) {
+          return { error: `APPEND segment ${segment} failed (${appendResp.status}): ${await appendResp.text()}` };
+        }
+      }
+
+      // FINALIZE
+      const finalParams: Record<string, string> = {
+        command: 'FINALIZE',
+        media_id: mediaId,
+      };
+      const finalResp = await fetch(initUrl, {
+        method: 'POST',
+        headers: {
+          ...this.getOAuthHeaderOnly('POST', initUrl, finalParams),
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams(finalParams).toString(),
+      });
+      if (!finalResp.ok) {
+        return { error: `FINALIZE failed (${finalResp.status}): ${await finalResp.text()}` };
+      }
+
+      const finalData = await finalResp.json() as {
+        media_id_string: string;
+        processing_info?: { state: string; check_after_secs?: number };
+      };
+
+      // Poll for processing completion (videos need async processing)
+      if (finalData.processing_info) {
+        let state = finalData.processing_info.state;
+        let waitSec = finalData.processing_info.check_after_secs ?? 5;
+        while (state === 'pending' || state === 'in_progress') {
+          await new Promise((r) => setTimeout(r, waitSec * 1000));
+          const statusUrl = `${initUrl}?command=STATUS&media_id=${mediaId}`;
+          const statusResp = await fetch(statusUrl, {
+            headers: { 'Authorization': this.generateOAuthHeader('GET', statusUrl) },
+          });
+          if (!statusResp.ok) break;
+          const statusData = await statusResp.json() as {
+            processing_info?: { state: string; check_after_secs?: number; error?: { message: string } };
+          };
+          state = statusData.processing_info?.state ?? 'succeeded';
+          waitSec = statusData.processing_info?.check_after_secs ?? 5;
+          if (state === 'failed') {
+            return { error: `Media processing failed: ${statusData.processing_info?.error?.message ?? 'unknown'}` };
+          }
+        }
+      }
+
+      return { mediaId };
+    } catch (err) {
+      return { error: `Upload failed: ${(err as Error).message}` };
+    }
+  }
+
+  /** Post a tweet with media file (image or video). Handles upload + tweet in one call. */
+  async postTweetWithMedia(text: string, filePath: string, options?: { replyTo?: string }): Promise<ToolResult> {
+    const upload = await this.uploadMedia(filePath);
+    if ('error' in upload) {
+      return createErrorResult(`Media upload failed: ${upload.error}`);
+    }
+    return this.postTweet(text, { mediaIds: [upload.mediaId], replyTo: options?.replyTo });
+  }
+
+  /** Like a tweet by ID. Uses Twitter API v2 POST /2/users/:id/likes */
+  async likeTweet(tweetId: string): Promise<ToolResult> {
+    try {
+      const userId = await this.getAuthenticatedUserId();
+      if (!userId) return createErrorResult('Failed to resolve authenticated Twitter user ID');
+
+      const likeUrl = `${TWITTER_API_V2}/users/${userId}/likes`;
+      const response = await fetch(likeUrl, {
+        method: 'POST',
+        headers: this.getHeaders('POST', likeUrl),
+        body: JSON.stringify({ tweet_id: tweetId }),
+      });
+
+      if (!response.ok) {
+        const err = await response.text();
+        return createErrorResult(`Twitter like failed (${response.status}): ${err}`);
+      }
+
+      return createToolResult(`Liked tweet ${tweetId}`, { liked: true, tweetId });
+    } catch (err) {
+      return createErrorResult(`Failed to like tweet: ${(err as Error).message}`);
+    }
+  }
+
+  /** Resolve the authenticated user's ID (cached after first call) */
+  private async getAuthenticatedUserId(): Promise<string | null> {
+    if (this.userId) return this.userId;
+
+    try {
+      const response = await fetch(`${TWITTER_API_V2}/users/me`, {
+        headers: { 'Authorization': `Bearer ${this.config.bearerToken}` },
+      });
+
+      if (!response.ok) return null;
+
+      const data = await response.json() as { data?: { id?: string } };
+      this.userId = data.data?.id ?? null;
+      return this.userId;
+    } catch {
+      return null;
+    }
+  }
+
   private getHeaders(method?: string, url?: string): Record<string, string> {
     // Use OAuth 1.0a for write requests (POST/DELETE), Bearer for read (GET)
     if (method && method.toUpperCase() !== 'GET') {
@@ -195,7 +374,12 @@ export class TwitterClient {
     };
   }
 
-  private generateOAuthHeader(method: string, url: string): string {
+  /** Return only the Authorization header (no Content-Type). Extra params included in signature. */
+  private getOAuthHeaderOnly(method: string, url: string, extraParams?: Record<string, string>): Record<string, string> {
+    return { 'Authorization': this.generateOAuthHeader(method, url, extraParams) };
+  }
+
+  private generateOAuthHeader(method: string, url: string, extraSignatureParams?: Record<string, string>): string {
     const timestamp = Math.floor(Date.now() / 1000).toString();
     const nonce = randomBytes(16).toString('hex');
 
@@ -208,8 +392,11 @@ export class TwitterClient {
       oauth_version: '1.0',
     };
 
+    // Include extra params in signature (e.g. command, media_id for non-multipart requests)
+    const allSignatureParams = { ...params, ...(extraSignatureParams ?? {}) };
+
     // Build parameter string (sorted)
-    const paramString = Object.entries(params)
+    const paramString = Object.entries(allSignatureParams)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
       .join('&');

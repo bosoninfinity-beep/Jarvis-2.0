@@ -37,6 +37,8 @@ import {
   RotateCcw,
   Layers,
   Package,
+  LogIn,
+  Key,
 } from 'lucide-react';
 import { formatTimeAgo } from '../utils/formatters.js';
 
@@ -154,6 +156,8 @@ export function AgentsView() {
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [lifecycleLoading, setLifecycleLoading] = useState<string | null>(null);
+  const [claudeAuthStatus, setClaudeAuthStatus] = useState<Record<string, { loggedIn: boolean; email?: string; loading: boolean; error?: string }>>({});
+  const [claudeLoginLoading, setClaudeLoginLoading] = useState<Record<string, boolean>>({});
 
   const agentList = Array.from(agents.values());
 
@@ -1147,6 +1151,97 @@ export function AgentsView() {
                       type="select"
                       options={['true', 'false']}
                     />
+                  </div>
+
+                  {/* Claude CLI Auth */}
+                  <div style={{
+                    marginTop: 16, padding: 14, borderRadius: 8,
+                    background: 'var(--bg-tertiary)', border: '1px solid var(--border-dim)',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                      <Key size={12} style={{ color: 'var(--cyan-bright)' }} />
+                      <span style={{
+                        fontSize: 9, fontFamily: 'var(--font-display)', letterSpacing: 1,
+                        color: 'var(--text-muted)', textTransform: 'uppercase',
+                      }}>
+                        CLAUDE CLI AUTH (MAX SUBSCRIPTION)
+                      </span>
+                      <div style={{ flex: 1 }} />
+                      {(() => {
+                        const status = claudeAuthStatus[selectedAgentId!];
+                        if (!status) return null;
+                        if (status.loading) return (
+                          <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                            <RefreshCw size={10} style={{ animation: 'spin 1s linear infinite', marginRight: 4 }} />
+                            Checking...
+                          </span>
+                        );
+                        return (
+                          <span style={{
+                            fontSize: 10, fontFamily: 'var(--font-mono)',
+                            display: 'flex', alignItems: 'center', gap: 4,
+                            color: status.loggedIn ? 'var(--green-bright)' : 'var(--red-bright)',
+                          }}>
+                            {status.loggedIn
+                              ? <><CheckCircle2 size={11} /> Logged in{status.email ? ` (${status.email})` : ''}</>
+                              : <><XCircle size={11} /> {status.error || 'Not logged in'}</>
+                            }
+                          </span>
+                        );
+                      })()}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        onClick={async () => {
+                          const aid = selectedAgentId!;
+                          setClaudeAuthStatus((prev) => ({ ...prev, [aid]: { loggedIn: false, loading: true } }));
+                          try {
+                            const res = await gateway.request<{ loggedIn: boolean; email?: string; error?: string }>('agents.claude-status', { agentId: aid });
+                            setClaudeAuthStatus((prev) => ({ ...prev, [aid]: { loggedIn: res?.loggedIn ?? false, email: res?.email, loading: false, error: res?.error } }));
+                          } catch (err) {
+                            setClaudeAuthStatus((prev) => ({ ...prev, [aid]: { loggedIn: false, loading: false, error: String(err) } }));
+                          }
+                        }}
+                        style={{
+                          fontSize: 9, padding: '6px 14px', borderRadius: 4,
+                          background: 'rgba(0,255,255,0.06)', border: '1px solid rgba(0,255,255,0.2)',
+                          color: 'var(--cyan-bright)', cursor: 'pointer',
+                          display: 'flex', alignItems: 'center', gap: 5,
+                          fontFamily: 'var(--font-display)', letterSpacing: 1,
+                        }}
+                      >
+                        <RefreshCw size={10} /> CHECK STATUS
+                      </button>
+                      <button
+                        disabled={!!claudeLoginLoading[selectedAgentId!]}
+                        onClick={async () => {
+                          const aid = selectedAgentId!;
+                          setClaudeLoginLoading((prev) => ({ ...prev, [aid]: true }));
+                          setClaudeAuthStatus((prev) => ({ ...prev, [aid]: { loggedIn: false, loading: true } }));
+                          try {
+                            const res = await gateway.request<{ loggedIn: boolean; email?: string; output?: string; error?: string }>('agents.claude-login', { agentId: aid });
+                            setClaudeAuthStatus((prev) => ({ ...prev, [aid]: { loggedIn: res?.loggedIn ?? false, email: res?.email, loading: false, error: res?.loggedIn ? undefined : (res?.error || res?.output) } }));
+                          } catch (err) {
+                            setClaudeAuthStatus((prev) => ({ ...prev, [aid]: { loggedIn: false, loading: false, error: String(err) } }));
+                          } finally {
+                            setClaudeLoginLoading((prev) => ({ ...prev, [aid]: false }));
+                          }
+                        }}
+                        style={{
+                          fontSize: 9, padding: '6px 14px', borderRadius: 4,
+                          background: claudeLoginLoading[selectedAgentId!]
+                            ? 'rgba(255,170,0,0.06)'
+                            : 'rgba(0,255,65,0.06)',
+                          border: `1px solid ${claudeLoginLoading[selectedAgentId!] ? 'rgba(255,170,0,0.2)' : 'rgba(0,255,65,0.2)'}`,
+                          color: claudeLoginLoading[selectedAgentId!] ? 'var(--amber)' : 'var(--green-bright)',
+                          cursor: claudeLoginLoading[selectedAgentId!] ? 'wait' : 'pointer',
+                          display: 'flex', alignItems: 'center', gap: 5,
+                          fontFamily: 'var(--font-display)', letterSpacing: 1,
+                        }}
+                      >
+                        <LogIn size={10} /> {claudeLoginLoading[selectedAgentId!] ? 'LOGGING IN...' : 'LOGIN CLI'}
+                      </button>
+                    </div>
                   </div>
 
                   {/* System prompt */}

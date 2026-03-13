@@ -19,8 +19,8 @@ function validateEnv(): void {
     { key: 'REDIS_URL', label: 'Redis URL' },
   ];
 
-  // At least one LLM provider should be configured
-  const llmKeys = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_AI_API_KEY', 'OPENROUTER_API_KEY'];
+  // LLM: Claude CLI (Max subscription) — no API keys needed for Claude
+  const llmKeys = ['OPENAI_API_KEY', 'GOOGLE_AI_API_KEY', 'OPENROUTER_API_KEY'];
   const hasLlm = llmKeys.some(k => process.env[k] && process.env[k]!.length > 0);
 
   const errors: string[] = [];
@@ -40,7 +40,7 @@ function validateEnv(): void {
   }
 
   if (!hasLlm) {
-    log.warn('No LLM API key configured. Set at least one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY');
+    log.warn('No optional LLM API keys configured. Claude uses CLI (Max subscription). Optional: OPENAI_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY');
   }
 
   if (errors.length > 0) {

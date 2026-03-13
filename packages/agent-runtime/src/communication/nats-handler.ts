@@ -150,10 +150,10 @@ export class NatsHandler {
       servers,
       name: this.config.agentId,
       reconnect: true,
-      reconnectTimeWait: 3_000,   // Wait 3s between reconnect attempts
-      maxReconnectAttempts: -1,   // Infinite reconnect attempts
-      pingInterval: 5_000,        // Client ping every 5s to keep TCP alive on WiFi
-      maxPingOut: 5,              // Allow 5 missed pongs (= 25s before disconnect)
+      reconnectTimeWait: 5_000,   // Wait 5s between reconnect attempts (was 3s)
+      maxReconnectAttempts: 20,   // Max 20 attempts (~2 min), then scheduleReconnect takes over
+      pingInterval: 15_000,       // Client ping every 15s (was 5s — less aggressive)
+      maxPingOut: 3,              // Allow 3 missed pongs (= 45s before disconnect)
       timeout: 10_000,            // Initial connection timeout
       noEcho: true,
     };
@@ -254,7 +254,7 @@ export class NatsHandler {
       this.heartbeatInterval = null;
     }
 
-    const MAX_RECONNECT_CYCLES = 30; // ~5 minutes of retrying (30 * 10s)
+    const MAX_RECONNECT_CYCLES = 12; // ~3 minutes with exponential backoff
     const doReconnect = async () => {
       for (let i = 1; this.running; i++) {
         try {
@@ -263,7 +263,7 @@ export class NatsHandler {
             try { await this.nc.close(); } catch { /* ignore */ }
           }
 
-          log.info(`Reconnect attempt ${i}...`);
+          log.info(`Reconnect attempt ${i}/${MAX_RECONNECT_CYCLES}...`);
           this.nc = await this.connectOnce();
           log.info(`Reconnected to NATS — server: ${this.nc.getServer()}`);
           this.setupAfterConnect();
@@ -274,8 +274,10 @@ export class NatsHandler {
             this.currentStatus = 'error';
             return;
           }
-          log.warn(`Reconnect cycle ${i}/${MAX_RECONNECT_CYCLES} failed: ${(err as Error).message}. Waiting 10s...`);
-          await new Promise(r => setTimeout(r, 10_000));
+          // Exponential backoff: 5s, 10s, 15s, 20s... max 30s
+          const delay = Math.min(5_000 * i, 30_000);
+          log.warn(`Reconnect cycle ${i}/${MAX_RECONNECT_CYCLES} failed: ${(err as Error).message}. Waiting ${delay / 1000}s...`);
+          await new Promise(r => setTimeout(r, delay));
         }
       }
     };

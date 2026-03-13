@@ -154,47 +154,10 @@ export function ProvidersView() {
   const [providers, setProviders] = useState<ModelProvider[]>(DEFAULT_PROVIDERS);
   const [chains, setChains] = useState<FailoverChain[]>(DEFAULT_CHAINS);
   const [expandedChain, setExpandedChain] = useState<string | null>('default');
-  const [authMode, setAuthMode] = useState<'api-key' | 'claude-cli'>('api-key');
-  const [authSaving, setAuthSaving] = useState(false);
-  const [authSaved, setAuthSaved] = useState(false);
-
   // Load config from gateway
   useEffect(() => {
     loadConfig();
-    loadAuthMode();
   }, []);
-
-  const loadAuthMode = async () => {
-    try {
-      const result = await gateway.request('config.agent.get', { agentId: 'agent-smith' }) as {
-        config?: { authMode?: string };
-      };
-      if (result?.config?.authMode === 'claude-cli' || result?.config?.authMode === 'api-key') {
-        setAuthMode(result.config.authMode);
-      }
-    } catch { /* use default */ }
-  };
-
-  const saveAuthMode = async (mode: 'api-key' | 'claude-cli') => {
-    setAuthMode(mode);
-    setAuthSaving(true);
-    setAuthSaved(false);
-    try {
-      // Save for all agents
-      for (const agentId of ['jarvis', 'agent-smith', 'agent-johny']) {
-        await gateway.request('config.set', {
-          agentId,
-          config: { authMode: mode },
-        });
-      }
-      setAuthSaved(true);
-      setTimeout(() => setAuthSaved(false), 3000);
-    } catch {
-      /* save failed — config will be stale until next attempt */
-    } finally {
-      setAuthSaving(false);
-    }
-  };
 
   const loadConfig = useCallback(async () => {
     try {
@@ -275,98 +238,27 @@ export function ProvidersView() {
         </div>
       </div>
 
-      {/* Auth Mode Toggle */}
+      {/* Auth Mode — Claude CLI (Max) only */}
       <div style={{
         marginBottom: 20, padding: 16, borderRadius: 12,
-        background: authMode === 'claude-cli'
-          ? 'linear-gradient(135deg, rgba(0,255,65,0.06), rgba(0,255,65,0.02))'
-          : 'linear-gradient(135deg, rgba(217,119,87,0.06), rgba(217,119,87,0.02))',
-        border: `1px solid ${authMode === 'claude-cli' ? 'var(--green-primary)33' : '#D9775733'}`,
+        background: 'linear-gradient(135deg, rgba(0,255,65,0.06), rgba(0,255,65,0.02))',
+        border: '1px solid var(--green-primary)33',
       }}>
         <div style={{
           fontSize: 11, fontFamily: 'var(--font-display)', fontWeight: 700,
           letterSpacing: 2, color: 'var(--text-secondary)', marginBottom: 12,
           display: 'flex', alignItems: 'center', gap: 8,
         }}>
-          <Zap size={14} color={authMode === 'claude-cli' ? 'var(--green-bright)' : '#D97757'} />
-          ANTHROPIC AUTH MODE
-          {authSaved && (
-            <span style={{ fontSize: 9, color: 'var(--green-bright)', fontWeight: 400, letterSpacing: 0 }}>
-              <Check size={10} /> Saved — restart agent to apply
-            </span>
-          )}
+          <Zap size={14} color="var(--green-bright)" />
+          CLAUDE CLI (MAX)
+          <span style={{
+            fontSize: 8, padding: '1px 5px', borderRadius: 3, fontWeight: 700,
+            background: 'rgba(0,255,65,0.15)', color: 'var(--green-bright)',
+            fontFamily: 'var(--font-mono)', letterSpacing: 1,
+          }}>FREE</span>
         </div>
-
-        <div style={{ display: 'flex', gap: 10 }}>
-          {/* API Key option */}
-          <button
-            onClick={() => saveAuthMode('api-key')}
-            disabled={authSaving}
-            style={{
-              flex: 1, padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
-              background: authMode === 'api-key' ? 'rgba(217,119,87,0.12)' : 'var(--bg-tertiary)',
-              border: `2px solid ${authMode === 'api-key' ? '#D97757' : 'var(--border-dim)'}`,
-              textAlign: 'left', transition: 'all 0.2s',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-              <div style={{
-                width: 16, height: 16, borderRadius: '50%',
-                background: authMode === 'api-key' ? '#D97757' : 'transparent',
-                border: `2px solid ${authMode === 'api-key' ? '#D97757' : 'var(--text-muted)'}`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                {authMode === 'api-key' && <Check size={9} color="#000" />}
-              </div>
-              <span style={{
-                fontSize: 13, fontWeight: 700, fontFamily: 'var(--font-display)',
-                letterSpacing: 1, color: authMode === 'api-key' ? '#D97757' : 'var(--text-secondary)',
-              }}>
-                API Key
-              </span>
-              <DollarSign size={12} color={authMode === 'api-key' ? '#D97757' : 'var(--text-muted)'} />
-            </div>
-            <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-ui)', lineHeight: 1.5 }}>
-              Pay per token ($5/$25 per 1M). Direct API, native tool calling, streaming.
-            </div>
-          </button>
-
-          {/* Claude CLI option */}
-          <button
-            onClick={() => saveAuthMode('claude-cli')}
-            disabled={authSaving}
-            style={{
-              flex: 1, padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
-              background: authMode === 'claude-cli' ? 'rgba(0,255,65,0.08)' : 'var(--bg-tertiary)',
-              border: `2px solid ${authMode === 'claude-cli' ? 'var(--green-bright)' : 'var(--border-dim)'}`,
-              textAlign: 'left', transition: 'all 0.2s',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-              <div style={{
-                width: 16, height: 16, borderRadius: '50%',
-                background: authMode === 'claude-cli' ? 'var(--green-bright)' : 'transparent',
-                border: `2px solid ${authMode === 'claude-cli' ? 'var(--green-bright)' : 'var(--text-muted)'}`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                {authMode === 'claude-cli' && <Check size={9} color="#000" />}
-              </div>
-              <span style={{
-                fontSize: 13, fontWeight: 700, fontFamily: 'var(--font-display)',
-                letterSpacing: 1, color: authMode === 'claude-cli' ? 'var(--green-bright)' : 'var(--text-secondary)',
-              }}>
-                Claude CLI (Max)
-              </span>
-              <span style={{
-                fontSize: 8, padding: '1px 5px', borderRadius: 3, fontWeight: 700,
-                background: 'rgba(0,255,65,0.15)', color: 'var(--green-bright)',
-                fontFamily: 'var(--font-mono)', letterSpacing: 1,
-              }}>FREE</span>
-            </div>
-            <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-ui)', lineHeight: 1.5 }}>
-              Uses Max subscription — $0 per token. Same Opus 4.6 model via CLI subprocess.
-            </div>
-          </button>
+        <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-ui)', lineHeight: 1.5 }}>
+          Uses Max subscription — $0 per token. Same Opus 4.6 model via CLI subprocess.
         </div>
       </div>
 
@@ -418,12 +310,14 @@ export function ProvidersView() {
                 </button>
               </div>
 
-              {/* API Key status */}
+              {/* API Key / Auth status */}
               <div style={{
                 fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
                 marginBottom: 8, display: 'flex', alignItems: 'center', gap: 4,
               }}>
-                {provider.type === 'ollama' ? (
+                {provider.type === 'anthropic' ? (
+                  <><Shield size={8} color="var(--green-bright)" /> CLI (Max subscription)</>
+                ) : provider.type === 'ollama' ? (
                   <><Server size={8} /> {provider.baseUrl}</>
                 ) : provider.apiKey ? (
                   <><Shield size={8} color="var(--green-bright)" /> API Key configured</>

@@ -10,7 +10,7 @@
  * This plugin provides the database tool (12 tables) and prompt injection.
  */
 
-import { existsSync, readFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import type { AgentTool, ToolResult, ToolContext } from '@jarvis/tools';
@@ -27,247 +27,298 @@ const SQLITE_TIMEOUT_MS = 10_000;
 // ─── SQL Schema (matches prompt) ─────────────────────────────────────
 
 const SCHEMA_SQL = `
+-- 1. TRENDS: Market trends and opportunities
 CREATE TABLE IF NOT EXISTS trends (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date_discovered TEXT NOT NULL DEFAULT (date('now')),
   product TEXT NOT NULL,
   category TEXT NOT NULL,
+  platform TEXT,
   title TEXT NOT NULL,
   description TEXT,
   source_url TEXT,
-  confidence TEXT DEFAULT 'medium',
-  impact TEXT DEFAULT 'medium',
-  actionable INTEGER DEFAULT 0,
+  relevance_score INTEGER DEFAULT 5 CHECK(relevance_score BETWEEN 1 AND 10),
+  actionability TEXT DEFAULT 'monitor' CHECK(actionability IN ('immediate','short_term','long_term','monitor')),
   action_taken TEXT,
-  discovered_at TEXT DEFAULT (datetime('now')),
-  expires_at TEXT
+  status TEXT DEFAULT 'new' CHECK(status IN ('new','in_progress','actioned','archived')),
+  tags TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- 2. VIRAL TRACKER: Viral content intelligence
 CREATE TABLE IF NOT EXISTS viral_tracker (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date_found TEXT NOT NULL DEFAULT (date('now')),
   platform TEXT NOT NULL,
-  product TEXT,
-  content_type TEXT NOT NULL,
-  hook TEXT NOT NULL,
-  description TEXT,
-  engagement_count INTEGER,
+  creator TEXT,
+  content_url TEXT,
+  description TEXT NOT NULL,
+  format TEXT CHECK(format IN ('video','image','carousel','thread','story','reel','short','pin','article','other')),
+  estimated_views TEXT,
+  estimated_engagement TEXT,
   engagement_rate REAL,
-  views INTEGER,
-  shares INTEGER,
-  completion_rate REAL,
-  source_url TEXT,
   why_viral TEXT,
-  hook_type TEXT,
+  hook_used TEXT,
+  emotion_trigger TEXT,
   sound_used TEXT,
-  replicable INTEGER DEFAULT 0,
-  our_version TEXT,
-  tracked_at TEXT DEFAULT (datetime('now'))
+  applicable_to TEXT,
+  adaptation_idea TEXT,
+  adapted_content_id INTEGER,
+  status TEXT DEFAULT 'found' CHECK(status IN ('found','analyzed','adapting','adapted','archived')),
+  tags TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- 3. COMPETITORS: Competitive intelligence
 CREATE TABLE IF NOT EXISTS competitors (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product TEXT NOT NULL,
   name TEXT NOT NULL,
   website TEXT,
   description TEXT,
+  pricing TEXT,
   strengths TEXT,
   weaknesses TEXT,
-  pricing TEXT,
+  social_presence TEXT,
+  recent_moves TEXT,
+  user_sentiment TEXT,
+  market_share TEXT,
   funding TEXT,
-  market_position TEXT,
-  social_followers TEXT,
-  content_strategy TEXT,
-  last_move TEXT,
-  our_advantage TEXT,
-  threat_level TEXT DEFAULT 'medium',
+  tech_stack TEXT,
+  threat_level TEXT DEFAULT 'medium' CHECK(threat_level IN ('low','medium','high','critical')),
+  last_updated TEXT,
+  notes TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- 4. AUDIENCE INSIGHTS: Customer intelligence
 CREATE TABLE IF NOT EXISTS audience_insights (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product TEXT NOT NULL,
   segment TEXT NOT NULL,
-  insight_type TEXT NOT NULL,
+  insight_type TEXT NOT NULL CHECK(insight_type IN ('demographic','psychographic','behavioral','pain_point','desire','trend','quote')),
   insight TEXT NOT NULL,
   source TEXT,
   source_url TEXT,
-  confidence TEXT DEFAULT 'medium',
-  actionable INTEGER DEFAULT 0,
-  action_taken TEXT,
-  discovered_at TEXT DEFAULT (datetime('now'))
+  confidence TEXT DEFAULT 'medium' CHECK(confidence IN ('low','medium','high','verified')),
+  date_discovered TEXT,
+  tags TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- 5. CONTENT LIBRARY: All marketing content
 CREATE TABLE IF NOT EXISTS content_library (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product TEXT NOT NULL,
   platform TEXT NOT NULL,
-  content_type TEXT NOT NULL,
-  title TEXT,
+  content_type TEXT NOT NULL CHECK(content_type IN ('reel','tiktok','short','carousel','post','thread','story','pin','article','blog','ad','email','video','image','podcast','other')),
+  status TEXT DEFAULT 'idea' CHECK(status IN ('idea','draft','ready','scheduled','published','performing','underperforming','killed')),
+  title TEXT NOT NULL,
   hook TEXT,
-  body TEXT NOT NULL,
+  body TEXT,
   cta TEXT,
-  hashtags TEXT,
+  visual_description TEXT,
   media_asset_id INTEGER,
-  status TEXT DEFAULT 'draft',
-  scheduled_at TEXT,
-  published_at TEXT,
+  hashtags TEXT,
+  target_audience TEXT,
+  goal TEXT CHECK(goal IN ('awareness','engagement','conversion','retention','authority')),
+  inspired_by INTEGER,
+  campaign_id INTEGER,
   engagement_rate REAL,
-  impressions INTEGER,
-  reach INTEGER,
-  clicks INTEGER,
+  views INTEGER,
+  likes INTEGER,
   shares INTEGER,
+  comments INTEGER,
   saves INTEGER,
+  clicks INTEGER,
   conversions INTEGER,
+  scheduled_date TEXT,
+  published_date TEXT,
   performance_notes TEXT,
-  ab_variant TEXT,
-  ab_winner INTEGER DEFAULT 0,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS leads (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  product TEXT NOT NULL,
-  company_name TEXT,
-  contact_name TEXT,
-  email TEXT,
-  phone TEXT,
-  linkedin_url TEXT,
-  website TEXT,
-  industry TEXT,
-  company_size TEXT,
-  location TEXT,
-  current_solution TEXT,
-  pain_signals TEXT,
-  tech_stack TEXT,
-  lead_source TEXT,
-  score INTEGER DEFAULT 0,
-  score_breakdown TEXT,
-  status TEXT DEFAULT 'new',
-  outreach_channel TEXT,
-  outreach_history TEXT,
-  notes TEXT,
-  last_contact_at TEXT,
-  next_action TEXT,
-  next_action_date TEXT,
+  tags TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- 6. LEADS: B2B and influencer leads
+CREATE TABLE IF NOT EXISTS leads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT NOT NULL,
+  company_name TEXT NOT NULL,
+  contact_name TEXT,
+  title TEXT,
+  email TEXT,
+  linkedin TEXT,
+  phone TEXT,
+  website TEXT,
+  company_size TEXT,
+  revenue_estimate TEXT,
+  location TEXT,
+  industry TEXT,
+  current_solution TEXT,
+  pain_signals TEXT,
+  growth_signals TEXT,
+  lead_score INTEGER DEFAULT 0 CHECK(lead_score BETWEEN 0 AND 100),
+  source TEXT,
+  status TEXT DEFAULT 'new' CHECK(status IN ('new','researching','enriched','outreach','nurture','qualified','demo_booked','negotiating','won','lost','archived')),
+  outreach_history TEXT,
+  notes TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- 7. CAMPAIGNS: Marketing campaigns
 CREATE TABLE IF NOT EXISTS campaigns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product TEXT NOT NULL,
   name TEXT NOT NULL,
-  type TEXT NOT NULL,
-  status TEXT DEFAULT 'planning',
-  goal TEXT,
+  type TEXT NOT NULL CHECK(type IN ('social','email','ad','content','launch','viral_challenge','partnership','event','pr','seo','other')),
+  status TEXT DEFAULT 'planning' CHECK(status IN ('planning','active','paused','completed','killed')),
+  objective TEXT,
   target_audience TEXT,
   channels TEXT,
-  budget REAL DEFAULT 0,
+  budget REAL,
   spent REAL DEFAULT 0,
-  impressions INTEGER DEFAULT 0,
-  clicks INTEGER DEFAULT 0,
-  conversions INTEGER DEFAULT 0,
-  revenue REAL DEFAULT 0,
-  roi REAL,
-  roas REAL,
-  cac REAL,
   start_date TEXT,
   end_date TEXT,
+  kpi_targets TEXT,
+  kpi_results TEXT,
+  roas REAL,
+  content_ids TEXT,
   learnings TEXT,
-  auto_killed INTEGER DEFAULT 0,
-  auto_scaled INTEGER DEFAULT 0,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS market_data (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  product TEXT NOT NULL,
-  metric_name TEXT NOT NULL,
-  metric_value TEXT NOT NULL,
-  unit TEXT,
-  source TEXT,
-  source_url TEXT,
-  period TEXT,
-  confidence TEXT DEFAULT 'medium',
-  notes TEXT,
-  collected_at TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS chatbot_kb (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  bot TEXT NOT NULL,
-  category TEXT NOT NULL,
-  question TEXT,
-  answer TEXT NOT NULL,
-  tags TEXT,
-  priority INTEGER DEFAULT 0,
-  active INTEGER DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS performance_log (
+-- 8. MARKET DATA: Industry benchmarks and stats
+CREATE TABLE IF NOT EXISTS market_data (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product TEXT,
-  agent TEXT NOT NULL,
-  action_type TEXT NOT NULL,
-  description TEXT NOT NULL,
-  metric_name TEXT,
-  metric_before REAL,
-  metric_after REAL,
-  change_percent REAL,
-  success INTEGER,
-  learning TEXT,
-  logged_at TEXT DEFAULT (datetime('now'))
+  category TEXT NOT NULL,
+  data_point TEXT NOT NULL,
+  value TEXT,
+  source TEXT NOT NULL,
+  source_url TEXT,
+  date_of_data TEXT,
+  date_collected TEXT DEFAULT (date('now')),
+  reliability TEXT DEFAULT 'medium' CHECK(reliability IN ('low','medium','high','verified')),
+  notes TEXT,
+  tags TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- 9. CHATBOT KB: Knowledge base for chatbots
+CREATE TABLE IF NOT EXISTS chatbot_kb (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT NOT NULL,
+  category TEXT NOT NULL,
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  keywords TEXT,
+  priority INTEGER DEFAULT 5 CHECK(priority BETWEEN 1 AND 10),
+  last_updated TEXT,
+  source TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- 10. PERFORMANCE LOG: Action tracking
+CREATE TABLE IF NOT EXISTS performance_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT NOT NULL DEFAULT (date('now')),
+  agent TEXT NOT NULL,
+  action TEXT NOT NULL,
+  product TEXT,
+  result TEXT CHECK(result IN ('success','partial','failure','pending')),
+  metrics TEXT,
+  revenue_impact TEXT,
+  notes TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- 11. MEDIA ASSETS: Generated images, videos, audio
 CREATE TABLE IF NOT EXISTS media_assets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product TEXT NOT NULL,
-  asset_type TEXT NOT NULL,
-  tool_used TEXT NOT NULL,
-  prompt TEXT,
+  asset_type TEXT NOT NULL CHECK(asset_type IN ('image','video','audio','avatar','template','animation')),
+  generation_tool TEXT NOT NULL,
+  prompt_used TEXT,
   style TEXT,
-  dimensions TEXT,
+  aspect_ratio TEXT,
   duration_sec REAL,
+  file_size_kb INTEGER,
   output_path TEXT NOT NULL,
   thumbnail_path TEXT,
-  file_size_mb REAL,
-  quality_score INTEGER,
-  status TEXT DEFAULT 'generated',
-  used_in_content_ids TEXT,
+  quality_score INTEGER CHECK(quality_score BETWEEN 1 AND 10),
+  status TEXT DEFAULT 'generated' CHECK(status IN ('generating','generated','approved','published','rejected','archived')),
+  used_in_content_id INTEGER,
+  platform TEXT,
+  tags TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- 12. EMAIL CAMPAIGNS: Email sequences and performance
 CREATE TABLE IF NOT EXISTS email_campaigns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product TEXT NOT NULL,
-  campaign_name TEXT NOT NULL,
-  sequence_type TEXT NOT NULL,
-  provider TEXT DEFAULT 'brevo',
-  status TEXT DEFAULT 'draft',
-  total_recipients INTEGER DEFAULT 0,
+  sequence_type TEXT NOT NULL CHECK(sequence_type IN ('welcome','trial','re_engagement','b2b_nurture','post_purchase','referral','cart_abandon','event_triggered','blast','newsletter')),
+  name TEXT NOT NULL,
+  status TEXT DEFAULT 'draft' CHECK(status IN ('draft','active','paused','completed','killed')),
+  trigger_event TEXT,
+  audience_segment TEXT,
+  total_emails INTEGER DEFAULT 0,
   emails_sent INTEGER DEFAULT 0,
-  unique_opens INTEGER DEFAULT 0,
   open_rate REAL,
-  unique_clicks INTEGER DEFAULT 0,
   click_rate REAL,
-  replies INTEGER DEFAULT 0,
   reply_rate REAL,
-  unsubscribes INTEGER DEFAULT 0,
   unsubscribe_rate REAL,
-  bounces INTEGER DEFAULT 0,
-  conversions INTEGER DEFAULT 0,
   conversion_rate REAL,
-  revenue_attributed REAL DEFAULT 0,
-  ab_test_subject_a TEXT,
-  ab_test_subject_b TEXT,
-  ab_winner TEXT,
-  sequence_emails TEXT,
-  segment_criteria TEXT,
-  started_at TEXT,
-  completed_at TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  revenue_generated REAL DEFAULT 0,
+  subject_lines TEXT,
+  email_bodies TEXT,
+  ab_test_results TEXT,
+  send_schedule TEXT,
+  provider TEXT CHECK(provider IN ('brevo','resend','manual')),
+  learnings TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- INDEXES for performance
+CREATE INDEX IF NOT EXISTS idx_trends_product ON trends(product);
+CREATE INDEX IF NOT EXISTS idx_trends_status ON trends(status);
+CREATE INDEX IF NOT EXISTS idx_viral_platform ON viral_tracker(platform);
+CREATE INDEX IF NOT EXISTS idx_content_product_platform ON content_library(product, platform);
+CREATE INDEX IF NOT EXISTS idx_content_status ON content_library(status);
+CREATE INDEX IF NOT EXISTS idx_leads_product_score ON leads(product, lead_score DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
+CREATE INDEX IF NOT EXISTS idx_campaigns_product ON campaigns(product);
+CREATE INDEX IF NOT EXISTS idx_media_product ON media_assets(product);
+CREATE INDEX IF NOT EXISTS idx_email_product ON email_campaigns(product);
+CREATE INDEX IF NOT EXISTS idx_perf_date ON performance_log(date);
+`.trim();
+
+/** Schema version — bump when schema changes require migration */
+const SCHEMA_VERSION = 4;
+
+/** Migration: drop and recreate all tables for clean Hub v4 schema */
+const MIGRATION_SQL = `
+DROP TABLE IF EXISTS trends;
+DROP TABLE IF EXISTS viral_tracker;
+DROP TABLE IF EXISTS competitors;
+DROP TABLE IF EXISTS audience_insights;
+DROP TABLE IF EXISTS content_library;
+DROP TABLE IF EXISTS leads;
+DROP TABLE IF EXISTS campaigns;
+DROP TABLE IF EXISTS market_data;
+DROP TABLE IF EXISTS chatbot_kb;
+DROP TABLE IF EXISTS performance_log;
+DROP TABLE IF EXISTS media_assets;
+DROP TABLE IF EXISTS email_campaigns;
+DROP TABLE IF EXISTS _schema_version;
+CREATE TABLE _schema_version (version INTEGER PRIMARY KEY);
+INSERT INTO _schema_version VALUES (${SCHEMA_VERSION});
 `.trim();
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -363,15 +414,55 @@ function createMarketingDbTool(nasPath: string): AgentTool {
 
       try {
         switch (action) {
-          // ── Init: create all 12 tables ──
+          // ── Init: create all 12 tables + learning files ──
           case 'init': {
+            // Check schema version — migrate if outdated
+            let needsMigration = false;
+            try {
+              const versionResult = runSqlite3(dbPath, "SELECT version FROM _schema_version LIMIT 1;", true);
+              const parsed = JSON.parse(versionResult);
+              if (!parsed[0] || parsed[0].version < SCHEMA_VERSION) needsMigration = true;
+            } catch {
+              needsMigration = true; // table doesn't exist = old schema
+            }
+
+            if (needsMigration) {
+              runSqlite3(dbPath, MIGRATION_SQL, false);
+            }
+
             runSqlite3(dbPath, SCHEMA_SQL, false);
+
+            // Ensure schema version is recorded
+            try {
+              runSqlite3(dbPath, `INSERT OR REPLACE INTO _schema_version (version) VALUES (${SCHEMA_VERSION});`, false);
+            } catch { /* ignore if already set by migration */ }
+
+            // Create persistent learning files on NAS
+            const marketingDir = join(dbPath, '..'); // marketing/ dir
+            const learningFiles = [
+              { name: 'STRATEGY_LOG.md', header: '# Strategy Log\n\nRunning strategic decisions with reasoning. Updated every session.\n\n---\n' },
+              { name: 'LEARNINGS.md', header: '# Learnings\n\nWhat worked, what failed, and why. Updated after every review.\n\n---\n' },
+              { name: 'BRAND_VOICE.md', header: '# Brand Voice Guide\n\nEvolving brand voice per product (OKIDOOKI, NowTrust, MakeItFun).\n\n---\n' },
+              { name: 'KILL_LIST.md', header: '# Kill List\n\nKilled initiatives with reasons and full analysis.\n\n---\n' },
+            ];
+            const filesCreated: string[] = [];
+            for (const file of learningFiles) {
+              const filePath = join(marketingDir, file.name);
+              if (!existsSync(filePath)) {
+                writeFileSync(filePath, file.header, 'utf-8');
+                filesCreated.push(file.name);
+              }
+            }
+
             // Verify tables were created
             const tables = runSqlite3(dbPath, ".tables", false);
+            const fileStatus = filesCreated.length > 0
+              ? `\nLearning files created: ${filesCreated.join(', ')}`
+              : '\nLearning files: all exist';
             return {
               type: 'text',
-              content: `Database initialized at ${dbPath}\n\nTables created:\n${tables}`,
-              metadata: { dbPath, tables: tables.split(/\s+/).filter(Boolean) },
+              content: `Database initialized at ${dbPath} (schema v${SCHEMA_VERSION}${needsMigration ? ' — migrated' : ''})\n\nTables:\n${tables}${fileStatus}`,
+              metadata: { dbPath, tables: tables.split(/\s+/).filter(Boolean), schemaVersion: SCHEMA_VERSION },
             };
           }
 
@@ -587,6 +678,50 @@ export function createMarketingEnginePlugin(): JarvisPluginDefinition {
         title: 'Marketing Hub v4',
         content: promptContent,
         priority: 95,
+      });
+
+      // ── Content Autopilot Integration (maps Hub v4 commands to actual tools) ──
+      api.registerPromptSection({
+        title: 'Content Autopilot Integration',
+        content: `## Content Autopilot — Tool Mapping
+
+When running content autopilot or batch operations, map Hub v4 commands to these real tools:
+
+### Posting Flow
+1. Create content → \`marketing_db\` INSERT into content_library (status: 'ready')
+2. Generate media → \`media_generate\` with S.S.C.M.L. prompt → save to NAS → \`marketing_db\` INSERT into media_assets
+3. Schedule post → \`social_schedule\` with action 'batch_schedule' (auto-spaces by optimal times per product)
+4. Background executor auto-publishes when scheduled_at arrives via \`social_post\`
+5. Track metrics → \`social_analytics\` per platform → \`marketing_db\` UPDATE content_library with engagement data
+
+### Engagement Flow
+1. Monitor mentions → \`social_engage\` action 'monitor' per platform
+2. Find viral content → \`social_engage\` action 'search_viral' with niche query
+3. Reply to trending posts → \`social_engage\` action 'reply' (engagement farming)
+4. Like relevant content → \`social_engage\` action 'like' (algorithm signal)
+
+### Style Learning (XPatla-style)
+Before creating new content, ALWAYS query your performance history:
+\`\`\`
+marketing_db query "SELECT product, platform, hook, content_type, engagement_rate, views FROM content_library WHERE status IN ('published','performing') AND engagement_rate IS NOT NULL ORDER BY engagement_rate DESC LIMIT 15"
+\`\`\`
+Clone the hook style, format, and tone of your top performers. Kill patterns from your bottom performers.
+
+### Persistent Learning Files
+Read and update these files in the marketing/ folder on NAS:
+- \`STRATEGY_LOG.md\` — strategic decisions with reasoning (every session)
+- \`LEARNINGS.md\` — what worked/failed and why (after every review)
+- \`BRAND_VOICE.md\` — evolving brand voice per product (monthly)
+- \`KILL_LIST.md\` — killed initiatives with reasons (when underperformers found)
+
+### Skills Library
+32 expert marketing skills available at \`${nasPath}/marketing/skills/\`. Read the SKILL.md file before executing any marketing task:
+- Copywriting → \`skills/copywriting/SKILL.md\`
+- Social content → \`skills/social-content/SKILL.md\`
+- SEO audit → \`skills/seo-audit/SKILL.md\`
+- Email sequences → \`skills/email-sequence/SKILL.md\`
+- See marketing-agent prompt for full skill index.`,
+        priority: 10,
       });
 
       api.logger.info('Marketing Engine v4 loaded', {

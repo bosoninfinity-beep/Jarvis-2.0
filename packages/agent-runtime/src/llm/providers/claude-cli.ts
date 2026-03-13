@@ -103,11 +103,30 @@ const MODELS: ModelInfo[] = [
   { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (CLI)', provider: 'claude-cli', contextWindow: 200000, maxOutputTokens: 64000, supportsTools: true, supportsVision: true, costPerInputToken: 0, costPerOutputToken: 0 },
 ];
 
-/** Check if `claude` CLI is available */
+/** Check if `claude` CLI is available AND authenticated */
 function isClaudeAvailable(): boolean {
   try {
     const version = execSync(`"${CLAUDE_BIN}" --version`, { encoding: 'utf-8', timeout: 5000, env: { ...process.env, CLAUDECODE: '' } }).trim();
     log.info(`Claude CLI found: ${CLAUDE_BIN} (${version})`);
+
+    // Quick auth check: run a minimal prompt and see if it fails with "Not logged in"
+    try {
+      const testResult = execSync(`echo "hi" | "${CLAUDE_BIN}" -p --output-format json --max-turns 1 --model claude-haiku-4-5-20251001`, {
+        encoding: 'utf-8', timeout: 15000, env: buildSafeEnv(),
+      });
+      if (testResult.includes('Not logged in') || testResult.includes('is_error":true')) {
+        log.warn('Claude CLI is installed but NOT logged in — marking as unavailable');
+        return false;
+      }
+    } catch (authErr) {
+      const errMsg = (authErr as { stderr?: string }).stderr ?? (authErr as Error).message ?? '';
+      if (errMsg.includes('Not logged in') || errMsg.includes('login')) {
+        log.warn('Claude CLI is installed but NOT logged in — marking as unavailable');
+        return false;
+      }
+      // Other errors (network, etc.) — still mark as available, real error will surface at chat time
+    }
+
     return true;
   } catch (err) {
     log.warn(`Claude CLI check failed (${CLAUDE_BIN}): ${(err as Error).message?.slice(0, 100)}`);
@@ -195,11 +214,15 @@ function buildConversationPrompt(request: ChatRequest): string {
     }
   }
 
-  // Compact tool reminder — only for CUSTOM tools (built-in tools are handled natively by CLI)
+  // Strong tool reminder — only for CUSTOM tools (built-in tools are handled natively by CLI)
   const customTools = request.tools?.filter(t => !CLI_BUILTIN_TOOL_NAMES.has(t.name)) ?? [];
   if (customTools.length > 0) {
     const toolNames = customTools.map(t => t.name).join(', ');
-    parts.push(`[SYSTEM: Custom tools available: ${toolNames}. Use <tool_call> tags. For file/shell/web operations, use your built-in tools directly.]`);
+    parts.push(`[SYSTEM REMINDER — MANDATORY]
+You MUST use your custom tools when needed: ${toolNames}
+To use them, output <tool_call>{"name":"tool_name","input":{...}}</tool_call> in your response.
+These are REAL executable tools — the system parses the XML and runs them. Do NOT use Bash/curl instead.
+For file/shell/web operations, use your built-in tools directly.`);
   }
 
   return parts.join('\n\n');
@@ -208,6 +231,7 @@ function buildConversationPrompt(request: ChatRequest): string {
 /**
  * Build tool definition prompt section.
  * Instructs Claude to output tool calls in a parseable JSON format.
+ * These are EXECUTABLE tools — the system parses the XML and runs them.
  */
 function buildToolPrompt(tools: ToolDefinition[]): string {
   const toolDefs = tools.map((t) => {
@@ -220,19 +244,43 @@ function buildToolPrompt(tools: ToolDefinition[]): string {
     return `  ${t.name}: ${t.description}\n    Required: [${required.join(', ')}]\n${params}`;
   }).join('\n\n');
 
-  return `## Available Tools
+  // Build example calls for the first 2 tools to show concrete usage
+  const examples: string[] = [];
+  for (const t of tools.slice(0, 2)) {
+    const props = t.input_schema.properties as Record<string, { type?: string; enum?: string[] }> | undefined;
+    const req = (t.input_schema.required as string[]) ?? [];
+    const exampleInput: Record<string, string> = {};
+    for (const r of req) {
+      const p = props?.[r];
+      if (p?.enum) exampleInput[r] = p.enum[0];
+      else if (p?.type === 'number') exampleInput[r] = '10' as unknown as string;
+      else exampleInput[r] = `example_${r}`;
+    }
+    examples.push(`<tool_call>\n{"name": "${t.name}", "input": ${JSON.stringify(exampleInput)}}\n</tool_call>`);
+  }
 
-You have access to the following tools. To call a tool, output a JSON block wrapped in <tool_call> tags:
+  return `## EXECUTABLE CUSTOM TOOLS
 
-<tool_call>
-{"name": "tool_name", "input": {"param1": "value1"}}
-</tool_call>
+CRITICAL: You have access to custom tools listed below. These are REAL, EXECUTABLE tools.
+The runtime system parses your output for <tool_call> XML tags and executes them automatically.
+Results are returned to you as [Tool Result] messages.
 
-You may call multiple tools by outputting multiple <tool_call> blocks.
-After outputting tool calls, STOP and wait for results.
-If you don't need any tools, just respond with text normally.
+DO NOT try to call these tools using your built-in tool system — they are NOT built-in tools.
+DO NOT say "I can't use this tool" — you CAN, by outputting the XML tags below.
+DO NOT try to replicate their functionality with Bash/curl — use the tool directly.
 
-Tools:
+To call a tool, output EXACTLY this format (the system parses this literally):
+
+${examples.join('\n\n')}
+
+Rules:
+- Output the <tool_call> tags in your response text — the system extracts and executes them
+- You may call multiple tools by outputting multiple <tool_call> blocks
+- After outputting tool calls, STOP and wait for results
+- Results appear as [Tool Result for <id>]: <result text>
+- If a tool errors, you'll see ERROR: in the result — retry or adjust params
+
+Available tools:
 ${toolDefs}`;
 }
 
@@ -290,6 +338,28 @@ function buildRoleArgs(): string[] {
   return args;
 }
 
+/** Build a safe environment for the Claude CLI subprocess */
+function buildSafeEnv(): Record<string, string> {
+  // Ensure /opt/homebrew/bin is in PATH (Claude CLI shebang uses `#!/usr/bin/env node`)
+  let path = process.env['PATH'] ?? '/usr/bin:/bin:/usr/sbin:/sbin';
+  if (!path.includes('/opt/homebrew/bin')) {
+    path = `/opt/homebrew/bin:${path}`;
+  }
+
+  const env: Record<string, string> = {
+    PATH: path,
+    HOME: process.env['HOME'] ?? '',
+    USER: process.env['USER'] ?? '',
+    SHELL: process.env['SHELL'] ?? '/bin/bash',
+    TERM: process.env['TERM'] ?? 'xterm-256color',
+    LANG: process.env['LANG'] ?? 'en_US.UTF-8',
+    TMPDIR: process.env['TMPDIR'] ?? '/tmp',
+  };
+  if (process.env['NVM_DIR']) env['NVM_DIR'] = process.env['NVM_DIR'];
+  if (process.env['NVM_BIN']) env['NVM_BIN'] = process.env['NVM_BIN'];
+  return env;
+}
+
 export class ClaudeCliProvider implements LLMProvider {
   readonly id = 'claude-cli';
   readonly name = 'Claude CLI (Max)';
@@ -329,18 +399,7 @@ export class ClaudeCliProvider implements LLMProvider {
     try {
       // Use spawn to pass conversation via stdin, system prompt via --system-prompt flag
       const response = await new Promise<string>((resolve, reject) => {
-        const safeEnv: Record<string, string> = {
-          PATH: process.env['PATH'] ?? '',
-          HOME: process.env['HOME'] ?? '',
-          USER: process.env['USER'] ?? '',
-          SHELL: process.env['SHELL'] ?? '/bin/bash',
-          TERM: process.env['TERM'] ?? 'xterm-256color',
-          LANG: process.env['LANG'] ?? 'en_US.UTF-8',
-          TMPDIR: process.env['TMPDIR'] ?? '/tmp',
-        };
-        // Propagate NVM/Node paths if present
-        if (process.env['NVM_DIR']) safeEnv['NVM_DIR'] = process.env['NVM_DIR'];
-        if (process.env['NVM_BIN']) safeEnv['NVM_BIN'] = process.env['NVM_BIN'];
+        const safeEnv = buildSafeEnv();
 
         const roleArgs = buildRoleArgs();
         const child = spawn(CLAUDE_BIN, [
@@ -482,17 +541,7 @@ export class ClaudeCliProvider implements LLMProvider {
     }
 
     // Spawn claude with stream-json + partial messages for token-by-token output
-    const safeEnv: Record<string, string> = {
-      PATH: process.env['PATH'] ?? '',
-      HOME: process.env['HOME'] ?? '',
-      USER: process.env['USER'] ?? '',
-      SHELL: process.env['SHELL'] ?? '/bin/bash',
-      TERM: process.env['TERM'] ?? 'xterm-256color',
-      LANG: process.env['LANG'] ?? 'en_US.UTF-8',
-      TMPDIR: process.env['TMPDIR'] ?? '/tmp',
-    };
-    if (process.env['NVM_DIR']) safeEnv['NVM_DIR'] = process.env['NVM_DIR'];
-    if (process.env['NVM_BIN']) safeEnv['NVM_BIN'] = process.env['NVM_BIN'];
+    const safeEnv = buildSafeEnv();
 
     const roleArgs = buildRoleArgs();
     const child = spawn(CLAUDE_BIN, [

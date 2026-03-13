@@ -46,6 +46,7 @@ import {
   getChannelMessages as _getChannelMessages,
   appendChannelMessage as _appendChannelMessage,
 } from './channels/config.js';
+import { WhatsAppBridge } from './channels/whatsapp.js';
 
 const log = createLogger('gateway:server');
 
@@ -101,6 +102,8 @@ export class GatewayServer {
   private updateInProgress = false;
   private agentStates = new Map<string, { status: string; activeTaskId: string | null }>();
   private spawnedAgents = new Map<string, import('node:child_process').ChildProcess>();
+  private wa: WhatsAppBridge;
+  private readonly sshKeyPath: string;
 
   constructor(private readonly config: GatewayConfig) {
     this.app = express();
@@ -157,9 +160,49 @@ export class GatewayServer {
       maxDepth: 2,
     });
 
+    this.wa = new WhatsAppBridge({
+      nats: this.nats,
+      protocol: this.protocol,
+      nas: this.nas,
+      store: this.store,
+      getChannelConfig: (ch) => this.getChannelConfig(ch),
+      setChannelConfig: (ch, u) => this.setChannelConfig(ch, u),
+      appendChannelMessage: (ch, m) => this.appendChannelMessage(ch, m),
+      persistChatMessage: (sid, msg) => this.persistChatMessage(sid, msg),
+      getHealthStatus: () => this.getHealthStatus(),
+      assignTask: (t) => this.assignTask(t),
+      formatDuration,
+    });
+
+    this.sshKeyPath = resolve(process.env['HOME'] ?? '/Users/jarvis', '.ssh/id_ed25519');
+
     this.setupHttpRoutes();
     this.setupWebSocket();
     this.registerMethods();
+  }
+
+  // ── VNC / SSH target resolver (used by HTTP routes + RPC methods) ──
+  private resolveVncTarget(target: string): { ip: string; username: string; label: string } | null {
+    const tbEnabled = process.env['THUNDERBOLT_ENABLED'] === 'true';
+    if (target === 'smith') {
+      return {
+        ip: tbEnabled
+          ? (process.env['VNC_ALPHA_HOST_THUNDERBOLT'] ?? process.env['SMITH_IP'] ?? '192.168.1.37')
+          : (process.env['SMITH_IP'] ?? '192.168.1.37'),
+        username: process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? 'agent_smith',
+        label: 'Agent Smith (Dev)',
+      };
+    }
+    if (target === 'johny') {
+      return {
+        ip: tbEnabled
+          ? (process.env['VNC_BETA_HOST_THUNDERBOLT'] ?? process.env['JOHNY_IP'] ?? '192.168.1.253')
+          : (process.env['JOHNY_IP'] ?? '192.168.1.253'),
+        username: process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? 'kamilpadula',
+        label: 'Agent Johny (Marketing)',
+      };
+    }
+    return null;
   }
 
   /** Start the gateway server */
@@ -233,6 +276,12 @@ export class GatewayServer {
         resolve();
       });
     });
+
+    // WhatsApp auto-connect
+    const waConfig = this.getChannelConfig('whatsapp');
+    if (waConfig.autoConnect) {
+      this.wa.connect().catch((err) => log.warn('WhatsApp auto-connect failed:', { error: String(err) }));
+    }
 
     // Post-restart: check if we just completed an OTA update
     this.broadcastUpdateStatusOnRestart();
@@ -367,7 +416,7 @@ export class GatewayServer {
       }
     });
     this.app.post('/api/whatsapp/webhook', async (req, res) => {
-      try { await this.handleWhatsAppWebhook(req.body as Record<string, unknown>); res.sendStatus(200); }
+      try { await this.wa.handleWebhook(req.body as Record<string, unknown>); res.sendStatus(200); }
       catch (err) { log.error('WhatsApp webhook error', { error: String(err) }); res.sendStatus(500); }
     });
     this.app.post('/api/telegram/webhook', async (req, res) => {
@@ -467,50 +516,26 @@ export class GatewayServer {
       res.json({ tasks });
     });
 
-    // ── VNC helpers ────────────────────────────────────────────────────
-    const resolveVncTarget = (target: string): { ip: string; username: string; label: string } | null => {
-      const tbEnabled = process.env['THUNDERBOLT_ENABLED'] === 'true';
-      if (target === 'smith') {
-        return {
-          ip: tbEnabled
-            ? (process.env['VNC_ALPHA_HOST_THUNDERBOLT'] ?? process.env['SMITH_IP'] ?? '192.168.1.37')
-            : (process.env['SMITH_IP'] ?? '192.168.1.37'),
-          username: process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? 'agent_smith',
-          label: 'Agent Smith (Dev)',
-        };
-      }
-      if (target === 'johny') {
-        return {
-          ip: tbEnabled
-            ? (process.env['VNC_BETA_HOST_THUNDERBOLT'] ?? process.env['JOHNY_IP'] ?? '169.254.97.62')
-            : (process.env['JOHNY_IP'] ?? '169.254.97.62'),
-          username: process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? 'kamilpadula',
-          label: 'Agent Johny (Marketing)',
-        };
-      }
-      return null;
-    };
-
-    const sshKeyPath = resolve(process.env['HOME'] ?? '/Users/jarvis', '.ssh/id_ed25519');
-
     // ── VNC: embedded viewer — per-agent WebSocket proxy via Thunderbolt ──
-    this.app.get('/api/vnc', (_req, res) => {
-      const smith = resolveVncTarget('smith')!;
-      const johny = resolveVncTarget('johny')!;
-      const wsPort = process.env['VNC_WS_PORT'] ?? '6080';
+    this.app.get('/api/vnc', (req, res) => {
+      const smith = this.resolveVncTarget('smith')!;
+      const johny = this.resolveVncTarget('johny')!;
+      // Use gateway's built-in WS-to-TCP proxy (/ws/vnc/{target}) instead of direct agent websockify
+      const host = req.headers.host ?? `localhost:${this.port}`;
+      const proto = req.secure ? 'wss' : 'ws';
       res.json({
         endpoints: {
           smith: {
             label: smith.label,
-            wsUrl: `ws://${smith.ip}:${wsPort}`,
-            username: process.env['VNC_ALPHA_USERNAME'] ?? 'agent_smith',
-            password: process.env['VNC_ALPHA_PASSWORD'] ?? process.env['VNC_SMITH_PASSWORD'] ?? '',
+            wsUrl: `${proto}://${host}/ws/vnc/smith`,
+            username: process.env['VNC_ALPHA_USERNAME'] ?? process.env['SMITH_USER'] ?? 'agent_smith',
+            password: process.env['VNC_ALPHA_PASSWORD'] ?? process.env['VNC_SMITH_PASSWORD'] ?? process.env['SMITH_PASS'] ?? '',
           },
           johny: {
             label: johny.label,
-            wsUrl: `ws://${johny.ip}:${wsPort}`,
-            username: process.env['VNC_BETA_USERNAME'] ?? 'kamilpadula',
-            password: process.env['VNC_BETA_PASSWORD'] ?? process.env['VNC_JOHNY_PASSWORD'] ?? '',
+            wsUrl: `${proto}://${host}/ws/vnc/johny`,
+            username: process.env['VNC_BETA_USERNAME'] ?? process.env['JOHNY_USER'] ?? 'kamilpadula',
+            password: process.env['VNC_BETA_PASSWORD'] ?? process.env['VNC_JOHNY_PASSWORD'] ?? process.env['JOHNY_PASS'] ?? '',
           },
         },
       });
@@ -518,12 +543,12 @@ export class GatewayServer {
 
     // ── VNC: clipboard via SSH pbcopy/pbpaste ───────────────────────────
     this.app.get('/api/vnc/clipboard', async (req, res) => {
-      const target = resolveVncTarget(String(req.query.target ?? ''));
+      const target = this.resolveVncTarget(String(req.query.target ?? ''));
       if (!target) { res.status(400).json({ error: 'Invalid target (smith|johny)' }); return; }
 
       try {
         const { stdout } = await execFileAsync('ssh', [
-          '-i', sshKeyPath,
+          '-i', this.sshKeyPath,
           '-o', 'StrictHostKeyChecking=no',
           '-o', 'ConnectTimeout=5',
           `${target.username}@${target.ip}`,
@@ -537,13 +562,13 @@ export class GatewayServer {
     });
 
     this.app.post('/api/vnc/clipboard', express.text({ limit: '1mb' }), async (req, res) => {
-      const target = resolveVncTarget(String(req.query.target ?? ''));
+      const target = this.resolveVncTarget(String(req.query.target ?? ''));
       if (!target) { res.status(400).json({ error: 'Invalid target (smith|johny)' }); return; }
 
       try {
         const text = typeof req.body === 'string' ? req.body : String(req.body);
         const child = spawn('ssh', [
-          '-i', sshKeyPath,
+          '-i', this.sshKeyPath,
           '-o', 'StrictHostKeyChecking=no',
           '-o', 'ConnectTimeout=5',
           `${target.username}@${target.ip}`,
@@ -566,7 +591,7 @@ export class GatewayServer {
 
     // ── VNC: file upload via SCP ────────────────────────────────────────
     this.app.post('/api/vnc/upload', express.raw({ limit: '100mb', type: 'application/octet-stream' }), async (req, res) => {
-      const target = resolveVncTarget(String(req.query.target ?? ''));
+      const target = this.resolveVncTarget(String(req.query.target ?? ''));
       const filename = String(req.query.filename ?? 'upload');
       if (!target) { res.status(400).json({ error: 'Invalid target (smith|johny)' }); return; }
 
@@ -578,7 +603,7 @@ export class GatewayServer {
         writeFileSync(tmpPath, buffer);
 
         await execFileAsync('scp', [
-          '-i', sshKeyPath,
+          '-i', this.sshKeyPath,
           '-o', 'StrictHostKeyChecking=no',
           '-o', 'ConnectTimeout=10',
           tmpPath,
@@ -616,7 +641,7 @@ export class GatewayServer {
             },
             agents: {
               smith: { ip: process.env['SMITH_IP'] ?? process.env['ALPHA_IP'] ?? '', user: process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? '', role: 'dev', vnc_port: 6080 },
-              johny: { ip: process.env['JOHNY_IP'] ?? process.env['BETA_IP'] ?? '', user: process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? '', role: 'marketing', vnc_port: 6081 },
+              johny: { ip: process.env['JOHNY_IP'] ?? process.env['BETA_IP'] ?? '', user: process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? '', role: 'marketing', vnc_port: 6080 },
             },
             nas: {
               ip: process.env['NAS_IP'] ?? '',
@@ -716,8 +741,9 @@ export class GatewayServer {
     }
 
     // VNC env aliases: VNC_ALPHA_* = smith, VNC_BETA_* = johny, SMITH_IP/JOHNY_IP = LAN fallbacks
-    const smithHost = process.env['VNC_ALPHA_HOST_THUNDERBOLT'] ?? process.env['VNC_ALPHA_HOST'] ?? process.env['SMITH_IP'] ?? '192.168.1.37';
-    const johnyHost = process.env['VNC_BETA_HOST_THUNDERBOLT'] ?? process.env['VNC_BETA_HOST'] ?? process.env['JOHNY_IP'] ?? '192.168.1.253';
+    const tbEnabled = process.env['THUNDERBOLT_ENABLED'] === 'true';
+    const smithHost = (tbEnabled && process.env['VNC_ALPHA_HOST_THUNDERBOLT']) ? process.env['VNC_ALPHA_HOST_THUNDERBOLT'] : (process.env['VNC_ALPHA_HOST'] ?? process.env['SMITH_IP'] ?? '192.168.1.37');
+    const johnyHost = (tbEnabled && process.env['VNC_BETA_HOST_THUNDERBOLT']) ? process.env['VNC_BETA_HOST_THUNDERBOLT'] : (process.env['VNC_BETA_HOST'] ?? process.env['JOHNY_IP'] ?? '192.168.1.253');
     const vncHost = target === 'smith' ? smithHost : johnyHost;
     const vncPort = 5900;
 
@@ -991,8 +1017,8 @@ export class GatewayServer {
           thunderbolt: tbEnabled && !!sTb,
         },
         johny: {
-          host: (tbEnabled && jTb) ? jTb : (process.env['VNC_JOHNY_HOST'] ?? process.env['VNC_BETA_HOST'] ?? '192.168.1.32'),
-          port: Number(process.env['VNC_JOHNY_PORT'] ?? process.env['VNC_BETA_PORT'] ?? 6081),
+          host: (tbEnabled && jTb) ? jTb : (process.env['VNC_JOHNY_HOST'] ?? process.env['VNC_BETA_HOST'] ?? '192.168.1.253'),
+          port: Number(process.env['VNC_JOHNY_PORT'] ?? process.env['VNC_BETA_PORT'] ?? 6080),
           label: 'Agent Johny (Marketing)',
           thunderbolt: tbEnabled && !!jTb,
         },
@@ -1434,28 +1460,28 @@ export class GatewayServer {
       return this.readFile(path);
     });
 
-    // --- WhatsApp (Baileys QR Login) ---
+    // --- WhatsApp (Baileys QR Login — delegated to WhatsAppBridge) ---
 
     this.protocol.registerMethod('whatsapp.status', async () => {
-      return this.getWhatsAppStatus();
+      return this.wa.getStatus();
     });
 
     this.protocol.registerMethod('whatsapp.login.start', async (params) => {
       const { force } = (params ?? {}) as { force?: boolean };
-      return this.startWhatsAppLogin(force ?? false);
+      return this.wa.startLogin(force ?? false);
     });
 
     this.protocol.registerMethod('whatsapp.login.wait', async () => {
-      return this.waitWhatsAppLogin();
+      return this.wa.waitLogin();
     });
 
     this.protocol.registerMethod('whatsapp.logout', async () => {
-      return this.logoutWhatsApp();
+      return this.wa.logout();
     });
 
     this.protocol.registerMethod('whatsapp.connect', async () => {
-      await this.connectWhatsApp();
-      return this.getWhatsAppStatus();
+      await this.wa.connect();
+      return this.wa.getStatus();
     });
 
     this.protocol.registerMethod('whatsapp.config.get', async () => {
@@ -1467,7 +1493,12 @@ export class GatewayServer {
     });
 
     this.protocol.registerMethod('whatsapp.send', async (params) => {
-      return this.sendWhatsAppMessage(params as { to: string; message: string });
+      return this.wa.sendMessage(params as { to: string; message: string });
+    });
+
+    this.protocol.registerMethod('whatsapp.sendImage', async (params) => {
+      const { to, image, caption } = params as { to: string; image: string; caption?: string };
+      return this.wa.sendImage({ to, image: Buffer.from(image, 'base64'), caption });
     });
 
     this.protocol.registerMethod('whatsapp.messages', async (params) => {
@@ -1740,7 +1771,7 @@ export class GatewayServer {
         reddit: has('REDDIT_CLIENT_ID'),
         // Media generation APIs
         flux: has('FLUX_API_KEY'),
-        kling: has('KLING_API_KEY'),
+        kling: has('KLING_ACCESS_KEY') && has('KLING_SECRET_KEY'),
         elevenlabs: has('ELEVENLABS_API_KEY'),
         heygen: has('HEYGEN_API_KEY'),
         runway: has('RUNWAY_API_KEY'),
@@ -1775,7 +1806,7 @@ export class GatewayServer {
     });
 
     this.protocol.registerMethod('social.schedule.list', async () => {
-      const schedulePath = this.nas.resolve('config/social-schedule.json');
+      const schedulePath = join(this.nas.getBasePath(), 'config', 'social-schedule.json');
       if (!existsSync(schedulePath)) return [];
       try {
         return JSON.parse(readFileSync(schedulePath, 'utf-8'));
@@ -1784,7 +1815,7 @@ export class GatewayServer {
 
     this.protocol.registerMethod('social.schedule', async (params) => {
       const p = params as Record<string, unknown>;
-      const schedulePath = this.nas.resolve('config/social-schedule.json');
+      const schedulePath = join(this.nas.getBasePath(), 'config', 'social-schedule.json');
       const dir = dirname(schedulePath);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
@@ -1814,7 +1845,7 @@ export class GatewayServer {
     this.protocol.registerMethod('social.schedule.cancel', async (params) => {
       const { post_id } = params as { post_id: string; action?: string };
       if (!post_id) throw new Error('post_id required');
-      const schedulePath = this.nas.resolve('config/social-schedule.json');
+      const schedulePath = join(this.nas.getBasePath(), 'config', 'social-schedule.json');
       if (!existsSync(schedulePath)) throw new Error('No schedule file found');
 
       const posts = JSON.parse(readFileSync(schedulePath, 'utf-8')) as Record<string, unknown>[];
@@ -1918,6 +1949,39 @@ export class GatewayServer {
 
       log.info(`Auto-post task sent to agent-johny: ${platform}`);
       return { success: true, message: 'Auto-post task dispatched to Agent Johny' };
+    });
+
+    // --- Products (dynamic list, persisted on NAS) ---
+
+    const productsFile = join(this.nas.getBasePath(), 'config', 'products.json');
+
+    const loadProducts = (): { id: string; label: string; color: string; desc: string }[] => {
+      try {
+        if (existsSync(productsFile)) return JSON.parse(readFileSync(productsFile, 'utf-8'));
+      } catch { /* ignore */ }
+      // Default seed
+      return [
+        { id: 'okidooki', label: 'OKIDOOKI', color: '#f472b6', desc: 'Nightlife reimagined' },
+        { id: 'nowtrust', label: 'NowTrust', color: '#3b82f6', desc: 'Trust & security platform' },
+        { id: 'makeitfun', label: 'MakeItFun', color: '#f59e0b', desc: 'AI-powered merch & design' },
+      ];
+    };
+
+    const saveProducts = (products: { id: string; label: string; color: string; desc: string }[]) => {
+      const dir = join(this.nas.getBasePath(), 'config');
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(productsFile, JSON.stringify(products, null, 2));
+    };
+
+    this.protocol.registerMethod('marketing.products.list', async () => {
+      return loadProducts();
+    });
+
+    this.protocol.registerMethod('marketing.products.save', async (params) => {
+      const { products } = params as { products: { id: string; label: string; color: string; desc: string }[] };
+      if (!Array.isArray(products)) throw new Error('products array required');
+      saveProducts(products);
+      return { success: true, count: products.length };
     });
 
     // --- Marketing Methods ---
@@ -2222,7 +2286,183 @@ export class GatewayServer {
       return { success: true, message: 'Website generation dispatched to Agent Johny' };
     });
 
-    // --- Marketing Hub v3 — SQLite endpoints ---
+    // --- Marketing Hub v4 — SQLite endpoints ---
+
+    this.protocol.registerMethod('marketing.db.init', async () => {
+      const dbPath = join(this.nas.getBasePath(), 'marketing', 'marketing.db');
+      const dbDir = join(this.nas.getBasePath(), 'marketing');
+      if (!existsSync(dbDir)) mkdirSync(dbDir, { recursive: true });
+
+      // Check schema version — migrate if outdated or missing
+      let needsMigration = false;
+      if (existsSync(dbPath)) {
+        try {
+          const vOut = execSync(`sqlite3 -json "${dbPath}" "SELECT version FROM _schema_version LIMIT 1;"`, { encoding: 'utf-8', timeout: 5000 });
+          const parsed = JSON.parse(vOut || '[]');
+          if (!parsed[0] || parsed[0].version < 4) needsMigration = true;
+        } catch { needsMigration = true; }
+      }
+
+      if (needsMigration && existsSync(dbPath)) {
+        log.info('Marketing DB: migrating to schema v4 (dropping old tables)');
+        const MIGRATION_SQL = `
+DROP TABLE IF EXISTS trends; DROP TABLE IF EXISTS viral_tracker; DROP TABLE IF EXISTS competitors;
+DROP TABLE IF EXISTS audience_insights; DROP TABLE IF EXISTS content_library; DROP TABLE IF EXISTS leads;
+DROP TABLE IF EXISTS campaigns; DROP TABLE IF EXISTS market_data; DROP TABLE IF EXISTS chatbot_kb;
+DROP TABLE IF EXISTS performance_log; DROP TABLE IF EXISTS media_assets; DROP TABLE IF EXISTS email_campaigns;
+DROP TABLE IF EXISTS scheduled_posts; DROP TABLE IF EXISTS _schema_version;
+DROP INDEX IF EXISTS idx_trends_product; DROP INDEX IF EXISTS idx_trends_status;
+DROP INDEX IF EXISTS idx_viral_platform; DROP INDEX IF EXISTS idx_content_product_platform;
+DROP INDEX IF EXISTS idx_content_status; DROP INDEX IF EXISTS idx_leads_product_score;
+DROP INDEX IF EXISTS idx_leads_status; DROP INDEX IF EXISTS idx_campaigns_product;
+DROP INDEX IF EXISTS idx_media_product; DROP INDEX IF EXISTS idx_email_product;
+DROP INDEX IF EXISTS idx_perf_date;
+`;
+        execSync(`sqlite3 -bail "${dbPath}"`, { input: MIGRATION_SQL, encoding: 'utf-8', timeout: 10_000 });
+      }
+
+      const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS trends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date_discovered TEXT NOT NULL DEFAULT (date('now')),
+  product TEXT NOT NULL, category TEXT NOT NULL, platform TEXT,
+  title TEXT NOT NULL, description TEXT, source_url TEXT,
+  relevance_score INTEGER DEFAULT 5 CHECK(relevance_score BETWEEN 1 AND 10),
+  actionability TEXT DEFAULT 'monitor' CHECK(actionability IN ('immediate','short_term','long_term','monitor')),
+  action_taken TEXT, status TEXT DEFAULT 'new' CHECK(status IN ('new','in_progress','actioned','archived')),
+  tags TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS viral_tracker (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date_found TEXT NOT NULL DEFAULT (date('now')),
+  platform TEXT NOT NULL, creator TEXT, content_url TEXT, description TEXT NOT NULL,
+  format TEXT CHECK(format IN ('video','image','carousel','thread','story','reel','short','pin','article','other')),
+  estimated_views TEXT, estimated_engagement TEXT, engagement_rate REAL,
+  why_viral TEXT, hook_used TEXT, emotion_trigger TEXT, sound_used TEXT,
+  applicable_to TEXT, adaptation_idea TEXT, adapted_content_id INTEGER,
+  status TEXT DEFAULT 'found' CHECK(status IN ('found','analyzed','adapting','adapted','archived')),
+  tags TEXT, created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS competitors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT NOT NULL, name TEXT NOT NULL, website TEXT, description TEXT,
+  pricing TEXT, strengths TEXT, weaknesses TEXT, social_presence TEXT,
+  recent_moves TEXT, user_sentiment TEXT, market_share TEXT, funding TEXT, tech_stack TEXT,
+  threat_level TEXT DEFAULT 'medium' CHECK(threat_level IN ('low','medium','high','critical')),
+  last_updated TEXT, notes TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS audience_insights (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT NOT NULL, segment TEXT NOT NULL,
+  insight_type TEXT NOT NULL CHECK(insight_type IN ('demographic','psychographic','behavioral','pain_point','desire','trend','quote')),
+  insight TEXT NOT NULL, source TEXT, source_url TEXT,
+  confidence TEXT DEFAULT 'medium' CHECK(confidence IN ('low','medium','high','verified')),
+  date_discovered TEXT, tags TEXT, created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS content_library (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT NOT NULL, platform TEXT NOT NULL,
+  content_type TEXT NOT NULL CHECK(content_type IN ('reel','tiktok','short','carousel','post','thread','story','pin','article','blog','ad','email','video','image','podcast','other')),
+  status TEXT DEFAULT 'idea' CHECK(status IN ('idea','draft','ready','scheduled','published','performing','underperforming','killed')),
+  title TEXT NOT NULL, hook TEXT, body TEXT, cta TEXT, visual_description TEXT,
+  media_asset_id INTEGER, hashtags TEXT, target_audience TEXT,
+  goal TEXT CHECK(goal IN ('awareness','engagement','conversion','retention','authority')),
+  inspired_by INTEGER, campaign_id INTEGER,
+  engagement_rate REAL, views INTEGER, likes INTEGER, shares INTEGER, comments INTEGER, saves INTEGER, clicks INTEGER, conversions INTEGER,
+  scheduled_date TEXT, published_date TEXT, performance_notes TEXT, tags TEXT,
+  created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS leads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT NOT NULL, company_name TEXT NOT NULL, contact_name TEXT, title TEXT,
+  email TEXT, linkedin TEXT, phone TEXT, website TEXT,
+  company_size TEXT, revenue_estimate TEXT, location TEXT, industry TEXT,
+  current_solution TEXT, pain_signals TEXT, growth_signals TEXT,
+  lead_score INTEGER DEFAULT 0 CHECK(lead_score BETWEEN 0 AND 100),
+  source TEXT, status TEXT DEFAULT 'new' CHECK(status IN ('new','researching','enriched','outreach','nurture','qualified','demo_booked','negotiating','won','lost','archived')),
+  outreach_history TEXT, notes TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS campaigns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT NOT NULL, name TEXT NOT NULL,
+  type TEXT NOT NULL CHECK(type IN ('social','email','ad','content','launch','viral_challenge','partnership','event','pr','seo','other')),
+  status TEXT DEFAULT 'planning' CHECK(status IN ('planning','active','paused','completed','killed')),
+  objective TEXT, target_audience TEXT, channels TEXT,
+  budget REAL, spent REAL DEFAULT 0, start_date TEXT, end_date TEXT,
+  kpi_targets TEXT, kpi_results TEXT, roas REAL, content_ids TEXT, learnings TEXT,
+  created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS market_data (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT, category TEXT NOT NULL, data_point TEXT NOT NULL, value TEXT,
+  source TEXT NOT NULL, source_url TEXT, date_of_data TEXT, date_collected TEXT DEFAULT (date('now')),
+  reliability TEXT DEFAULT 'medium' CHECK(reliability IN ('low','medium','high','verified')),
+  notes TEXT, tags TEXT, created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS chatbot_kb (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT NOT NULL, category TEXT NOT NULL, question TEXT NOT NULL, answer TEXT NOT NULL,
+  keywords TEXT, priority INTEGER DEFAULT 5 CHECK(priority BETWEEN 1 AND 10),
+  last_updated TEXT, source TEXT, created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS performance_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT, agent TEXT NOT NULL, action_type TEXT NOT NULL,
+  description TEXT NOT NULL, metric_name TEXT,
+  metric_before REAL, metric_after REAL, change_percent REAL,
+  success INTEGER, learning TEXT, logged_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS media_assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT NOT NULL, asset_type TEXT NOT NULL CHECK(asset_type IN ('image','video','audio','avatar','template','animation')),
+  generation_tool TEXT NOT NULL, prompt_used TEXT, style TEXT, aspect_ratio TEXT,
+  duration_sec REAL, file_size_kb INTEGER, output_path TEXT NOT NULL, thumbnail_path TEXT,
+  quality_score INTEGER CHECK(quality_score BETWEEN 1 AND 10),
+  status TEXT DEFAULT 'generated' CHECK(status IN ('generating','generated','approved','published','rejected','archived')),
+  used_in_content_id INTEGER, platform TEXT, tags TEXT, created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS email_campaigns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product TEXT NOT NULL,
+  sequence_type TEXT NOT NULL CHECK(sequence_type IN ('welcome','trial','re_engagement','b2b_nurture','post_purchase','referral','cart_abandon','event_triggered','blast','newsletter')),
+  name TEXT NOT NULL, status TEXT DEFAULT 'draft' CHECK(status IN ('draft','active','paused','completed','killed')),
+  trigger_event TEXT, audience_segment TEXT, total_emails INTEGER DEFAULT 0, emails_sent INTEGER DEFAULT 0,
+  open_rate REAL, click_rate REAL, reply_rate REAL, unsubscribe_rate REAL, conversion_rate REAL,
+  revenue_generated REAL DEFAULT 0, subject_lines TEXT, email_bodies TEXT, ab_test_results TEXT,
+  send_schedule TEXT, provider TEXT CHECK(provider IN ('brevo','resend','manual')),
+  learnings TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS _schema_version (version INTEGER PRIMARY KEY);
+CREATE INDEX IF NOT EXISTS idx_trends_product ON trends(product);
+CREATE INDEX IF NOT EXISTS idx_trends_status ON trends(status);
+CREATE INDEX IF NOT EXISTS idx_viral_platform ON viral_tracker(platform);
+CREATE INDEX IF NOT EXISTS idx_content_product_platform ON content_library(product, platform);
+CREATE INDEX IF NOT EXISTS idx_content_status ON content_library(status);
+CREATE INDEX IF NOT EXISTS idx_leads_product_score ON leads(product, lead_score DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
+CREATE INDEX IF NOT EXISTS idx_campaigns_product ON campaigns(product);
+CREATE INDEX IF NOT EXISTS idx_media_product ON media_assets(product);
+CREATE INDEX IF NOT EXISTS idx_email_product ON email_campaigns(product);
+CREATE INDEX IF NOT EXISTS idx_perf_logged ON performance_log(logged_at);
+INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
+`;
+      try {
+        execSync(`sqlite3 -bail "${dbPath}"`, {
+          input: SCHEMA_SQL, encoding: 'utf-8', timeout: 15_000, maxBuffer: 5 * 1024 * 1024,
+        });
+        // Verify
+        const verifyOut = execSync(`sqlite3 -json "${dbPath}" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '_%' ESCAPE '\\' ORDER BY name;"`, {
+          encoding: 'utf-8', timeout: 5_000, maxBuffer: 1024 * 1024,
+        });
+        const tables = JSON.parse(verifyOut || '[]').map((r: { name: string }) => r.name);
+        log.info(`Marketing DB initialized at ${dbPath} — ${tables.length} tables`);
+        return { success: true, dbPath, tables, schemaVersion: 4 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(`Marketing DB init failed: ${msg}`);
+        throw new Error(`Database init failed: ${msg}`);
+      }
+    });
 
     this.protocol.registerMethod('marketing.db.kpis', async () => {
       const dbPath = join(this.nas.getBasePath(), 'marketing', 'marketing.db');
@@ -2233,20 +2473,22 @@ export class GatewayServer {
           (SELECT COUNT(*) FROM campaigns WHERE status='active') AS active_campaigns,
           (SELECT COALESCE(SUM(budget),0) FROM campaigns) AS total_budget,
           (SELECT COALESCE(SUM(spent),0) FROM campaigns) AS total_spent,
-          (SELECT COALESCE(SUM(revenue),0) FROM campaigns) AS total_revenue,
-          (SELECT ROUND(AVG(roi),1) FROM campaigns WHERE roi IS NOT NULL) AS avg_roi,
+          (SELECT COALESCE(SUM(roas),0) FROM campaigns) AS total_revenue,
+          (SELECT ROUND(AVG(roas),1) FROM campaigns WHERE roas IS NOT NULL) AS avg_roi,
           (SELECT COUNT(*) FROM leads) AS total_leads,
           (SELECT COUNT(*) FROM leads WHERE created_at > datetime('now','-7 days')) AS new_leads,
-          (SELECT COUNT(*) FROM leads WHERE score >= 70) AS hot_leads,
+          (SELECT COUNT(*) FROM leads WHERE lead_score >= 70) AS hot_leads,
           (SELECT COUNT(*) FROM content_library) AS total_content,
           (SELECT COUNT(*) FROM content_library WHERE status='published') AS published_content,
           (SELECT COUNT(*) FROM trends) AS total_trends,
-          (SELECT COUNT(*) FROM trends WHERE actionable=1) AS actionable_trends,
+          (SELECT COUNT(*) FROM trends WHERE actionability='immediate') AS actionable_trends,
           (SELECT COUNT(*) FROM competitors) AS total_competitors,
           (SELECT COUNT(*) FROM viral_tracker) AS total_viral,
           (SELECT COUNT(*) FROM performance_log) AS total_actions,
           (SELECT COUNT(*) FROM performance_log WHERE success=1) AS successful_actions,
-          (SELECT COUNT(DISTINCT agent) FROM performance_log) AS active_agents;`;
+          (SELECT COUNT(DISTINCT agent) FROM performance_log) AS active_agents,
+          (SELECT COUNT(*) FROM media_assets) AS total_media,
+          (SELECT COUNT(*) FROM email_campaigns) AS total_email_campaigns;`;
         const { stdout } = await execFileAsync('sqlite3', ['-json', dbPath, sql], {
           timeout: 10_000, maxBuffer: 5 * 1024 * 1024,
         });
@@ -2268,7 +2510,9 @@ export class GatewayServer {
           UNION ALL SELECT 'campaigns', COUNT(*) FROM campaigns
           UNION ALL SELECT 'market_data', COUNT(*) FROM market_data
           UNION ALL SELECT 'chatbot_kb', COUNT(*) FROM chatbot_kb
-          UNION ALL SELECT 'performance_log', COUNT(*) FROM performance_log;`;
+          UNION ALL SELECT 'performance_log', COUNT(*) FROM performance_log
+          UNION ALL SELECT 'media_assets', COUNT(*) FROM media_assets
+          UNION ALL SELECT 'email_campaigns', COUNT(*) FROM email_campaigns;`;
         const { stdout } = await execFileAsync('sqlite3', ['-json', dbPath, sql], {
           timeout: 10_000, maxBuffer: 5 * 1024 * 1024,
         });
@@ -2278,7 +2522,8 @@ export class GatewayServer {
 
     this.protocol.registerMethod('marketing.db.query', async (params) => {
       const ALLOWED_TABLES = ['trends', 'viral_tracker', 'competitors', 'audience_insights',
-        'content_library', 'leads', 'campaigns', 'market_data', 'chatbot_kb', 'performance_log'];
+        'content_library', 'leads', 'campaigns', 'market_data', 'chatbot_kb', 'performance_log',
+        'media_assets', 'email_campaigns'];
       const p = params as { table: string; limit?: number; offset?: number; where?: string; orderBy?: string };
       if (!p.table || !ALLOWED_TABLES.includes(p.table)) throw new Error(`Invalid table: ${p.table}`);
       const limit = Math.min(p.limit ?? 100, 200);
@@ -2313,8 +2558,8 @@ export class GatewayServer {
         const sql = `SELECT agent,
           COUNT(*) AS total_actions,
           SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) AS successful,
-          MAX(timestamp) AS last_action,
-          (SELECT description FROM performance_log p2 WHERE p2.agent = performance_log.agent ORDER BY timestamp DESC LIMIT 1) AS last_description
+          MAX(logged_at) AS last_action,
+          (SELECT description FROM performance_log p2 WHERE p2.agent = performance_log.agent ORDER BY logged_at DESC LIMIT 1) AS last_description
           FROM performance_log GROUP BY agent ORDER BY total_actions DESC;`;
         const { stdout } = await execFileAsync('sqlite3', ['-json', dbPath, sql], {
           timeout: 10_000, maxBuffer: 5 * 1024 * 1024,
@@ -2332,6 +2577,53 @@ export class GatewayServer {
       } satisfies ChatMessage);
       log.info(`Marketing command dispatched: ${p.command.slice(0, 100)}`);
       return { success: true, message: `Command dispatched to Agent Johny: ${p.command.slice(0, 100)}` };
+    });
+
+    // --- Marketing Skills Library ---
+
+    this.protocol.registerMethod('marketing.skills.list', async () => {
+      const skillsDir = join(this.nas.getBasePath(), 'marketing', 'skills');
+      if (!existsSync(skillsDir)) return [];
+      try {
+        const dirs = readdirSync(skillsDir).filter(d => {
+          const p = join(skillsDir, d);
+          return statSync(p).isDirectory() && existsSync(join(p, 'SKILL.md'));
+        });
+        const CATEGORIES: Record<string, string> = {
+          'page-cro': 'CRO', 'signup-flow-cro': 'CRO', 'onboarding-cro': 'CRO', 'form-cro': 'CRO', 'popup-cro': 'CRO', 'paywall-upgrade-cro': 'CRO',
+          'copywriting': 'Content & Copy', 'copy-editing': 'Content & Copy', 'cold-email': 'Content & Copy', 'email-sequence': 'Content & Copy', 'social-content': 'Content & Copy', 'content-strategy': 'Content & Copy',
+          'seo-audit': 'SEO & Discovery', 'ai-seo': 'SEO & Discovery', 'programmatic-seo': 'SEO & Discovery', 'site-architecture': 'SEO & Discovery', 'competitor-alternatives': 'SEO & Discovery', 'schema-markup': 'SEO & Discovery',
+          'paid-ads': 'Paid & Measurement', 'ad-creative': 'Paid & Measurement', 'analytics-tracking': 'Paid & Measurement', 'ab-test-setup': 'Paid & Measurement',
+          'churn-prevention': 'Growth & Retention', 'free-tool-strategy': 'Growth & Retention', 'referral-program': 'Growth & Retention',
+          'marketing-ideas': 'Strategy', 'marketing-psychology': 'Strategy', 'launch-strategy': 'Strategy', 'pricing-strategy': 'Strategy',
+          'revops': 'Sales & RevOps', 'sales-enablement': 'Sales & RevOps',
+          'product-marketing-context': 'Foundation',
+        };
+        return dirs.map(name => {
+          const skillPath = join(skillsDir, name, 'SKILL.md');
+          const content = readFileSync(skillPath, 'utf-8');
+          const titleMatch = content.match(/^#\s+(.+)/m);
+          const hasEvals = existsSync(join(skillsDir, name, 'evals'));
+          const hasRefs = existsSync(join(skillsDir, name, 'references'));
+          return {
+            id: name,
+            title: titleMatch?.[1] ?? name,
+            category: CATEGORIES[name] ?? 'Other',
+            hasEvals,
+            hasReferences: hasRefs,
+            lines: content.split('\n').length,
+          };
+        });
+      } catch { return []; }
+    });
+
+    this.protocol.registerMethod('marketing.skills.read', async (params) => {
+      const p = params as { id: string; file?: string };
+      if (!p.id || p.id.includes('..') || p.id.includes('/')) throw new Error('Invalid skill id');
+      const skillsDir = join(this.nas.getBasePath(), 'marketing', 'skills');
+      const target = p.file ? join(skillsDir, p.id, p.file) : join(skillsDir, p.id, 'SKILL.md');
+      if (!existsSync(target)) throw new Error(`Skill not found: ${p.id}`);
+      return { id: p.id, content: readFileSync(target, 'utf-8') };
     });
 
     // --- Marketing API Keys ---
@@ -2477,7 +2769,7 @@ export class GatewayServer {
       ].join('\n');
 
       // Append LLM keys from current env
-      const llmKeys = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_AI_API_KEY', 'OPENROUTER_API_KEY', 'OLLAMA_HOST'];
+      const llmKeys = ['OPENAI_API_KEY', 'GOOGLE_AI_API_KEY', 'OPENROUTER_API_KEY', 'OLLAMA_HOST'];
       const llmSnippet = llmKeys
         .filter((k) => process.env[k])
         .map((k) => `${k}=${process.env[k]}`)
@@ -2555,7 +2847,7 @@ export class GatewayServer {
         `JARVIS_AUTH_TOKEN=${entry.authToken}`,
       ];
 
-      const llmKeys = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_AI_API_KEY', 'OPENROUTER_API_KEY', 'OLLAMA_HOST'];
+      const llmKeys = ['OPENAI_API_KEY', 'GOOGLE_AI_API_KEY', 'OPENROUTER_API_KEY', 'OLLAMA_HOST'];
       for (const k of llmKeys) {
         if (process.env[k]) lines.push(`${k}=${process.env[k]}`);
       }
@@ -2711,6 +3003,93 @@ export class GatewayServer {
         return { reachable: true, latencyMs: Date.now() - start };
       } catch {
         return { reachable: false, latencyMs: Date.now() - start };
+      }
+    });
+
+    // ── Claude CLI Auth: check status + login on remote agents ────────
+    this.protocol.registerMethod('agents.claude-status', async (params) => {
+      const { agentId } = params as { agentId: string };
+      if (!agentId) throw new Error('agentId is required');
+
+      // Determine SSH target
+      const slot = agentId === 'agent-smith' ? 'smith' : agentId === 'agent-johny' ? 'johny' : null;
+      if (agentId === 'jarvis') {
+        // Local — check directly
+        try {
+          const raw = execSync('claude auth status 2>&1', { encoding: 'utf-8', timeout: 10000 }).trim();
+          const status = JSON.parse(raw);
+          return { agentId, ...status };
+        } catch (err) {
+          return { agentId, loggedIn: false, error: (err as Error).message };
+        }
+      }
+      if (!slot) throw new Error(`Unknown agent: ${agentId}`);
+
+      const target = this.resolveVncTarget(slot);
+      if (!target) throw new Error(`Cannot resolve SSH target for ${agentId}`);
+
+      try {
+        const raw = execSync(
+          `ssh -i "${this.sshKeyPath}" -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${target.username}@${target.ip} 'export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude auth status 2>&1'`,
+          { encoding: 'utf-8', timeout: 15000 },
+        ).trim();
+        const status = JSON.parse(raw);
+        return { agentId, ...status };
+      } catch (err) {
+        return { agentId, loggedIn: false, error: (err as Error).message };
+      }
+    });
+
+    this.protocol.registerMethod('agents.claude-login', async (params) => {
+      const { agentId } = params as { agentId: string };
+      if (!agentId) throw new Error('agentId is required');
+
+      const slot = agentId === 'agent-smith' ? 'smith' : agentId === 'agent-johny' ? 'johny' : null;
+      if (agentId === 'jarvis') {
+        // Local — run claude login directly
+        try {
+          const raw = execSync(
+            'export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude login --method claude-ai 2>&1 || true',
+            { encoding: 'utf-8', timeout: 30000 },
+          ).trim();
+          const statusRaw = execSync('claude auth status 2>&1', { encoding: 'utf-8', timeout: 10000 }).trim();
+          try {
+            const status = JSON.parse(statusRaw);
+            return { agentId, output: raw, ...status };
+          } catch {
+            return { agentId, output: raw, loggedIn: false, statusRaw };
+          }
+        } catch (err) {
+          return { agentId, loggedIn: false, error: (err as Error).message };
+        }
+      }
+      if (!slot) throw new Error(`Unknown agent: ${agentId}`);
+
+      const target = this.resolveVncTarget(slot);
+      if (!target) throw new Error(`Cannot resolve SSH target for ${agentId}`);
+
+      // Run claude login with API key method (non-interactive)
+      // This creates a login URL the user needs to visit
+      try {
+        const raw = execSync(
+          `ssh -i "${this.sshKeyPath}" -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${target.username}@${target.ip} 'export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude login --method claude-ai 2>&1 || true'`,
+          { encoding: 'utf-8', timeout: 30000 },
+        ).trim();
+
+        // Check if login succeeded
+        const statusRaw = execSync(
+          `ssh -i "${this.sshKeyPath}" -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${target.username}@${target.ip} 'export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude auth status 2>&1'`,
+          { encoding: 'utf-8', timeout: 15000 },
+        ).trim();
+
+        try {
+          const status = JSON.parse(statusRaw);
+          return { agentId, output: raw, ...status };
+        } catch {
+          return { agentId, output: raw, loggedIn: false, statusRaw };
+        }
+      } catch (err) {
+        return { agentId, loggedIn: false, error: (err as Error).message };
       }
     });
 
@@ -2991,7 +3370,7 @@ export class GatewayServer {
       ];
 
       // Append LLM keys from current env
-      const llmKeys = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_AI_API_KEY', 'OPENROUTER_API_KEY', 'OLLAMA_HOST'];
+      const llmKeys = ['OPENAI_API_KEY', 'GOOGLE_AI_API_KEY', 'OPENROUTER_API_KEY', 'OLLAMA_HOST'];
       for (const k of llmKeys) {
         if (process.env[k]) envLines.push(`${k}=${process.env[k]}`);
       }
@@ -3168,6 +3547,14 @@ export class GatewayServer {
 
       this.protocol.broadcast(result.success !== false ? 'task.completed' : 'task.failed', result);
 
+      // WhatsApp notification for task results
+      const taskTitle = (result.title as string) ?? result.taskId ?? 'unknown';
+      if (result.success !== false) {
+        this.wa.notify(`Task ${taskTitle}: completed`).catch(() => {});
+      } else {
+        this.wa.notify(`Task ${taskTitle}: FAILED`).catch(() => {});
+      }
+
       // Notify dependency orchestrator of completion/failure
       if (result.taskId) {
         if (result.success !== false) {
@@ -3188,12 +3575,9 @@ export class GatewayServer {
       this.protocol.broadcast('chat.message', data);
 
       // Forward to WhatsApp if this is a WhatsApp session response
-      if (msg.sessionId && this.waActiveChats.has(msg.sessionId) && msg.content) {
-        const jid = this.waActiveChats.get(msg.sessionId)!;
-        this.sendWhatsAppMessage({ to: jid, message: msg.content }).catch((err) => {
-          log.error(`WhatsApp reply failed: ${(err as Error).message}`);
-        });
-      }
+      this.wa.handleChatBroadcast(msg).catch((err) => {
+        log.error(`WhatsApp chat broadcast error: ${(err as Error).message}`);
+      });
     });
 
     // Chat stream deltas from agents (ephemeral, NOT persisted)
@@ -3779,7 +4163,6 @@ export class GatewayServer {
     // Add env-based keys as fallback
     if (data.keys.length === 0) {
       const envKeySources: Array<{ id: string; name: string; provider: string; envVar: string }> = [
-        { id: 'env-anthropic', name: 'ANTHROPIC_API_KEY', provider: 'anthropic', envVar: 'ANTHROPIC_API_KEY' },
         { id: 'env-openai', name: 'OPENAI_API_KEY', provider: 'openai', envVar: 'OPENAI_API_KEY' },
         { id: 'env-spotify', name: 'SPOTIFY_ACCESS_TOKEN', provider: 'spotify', envVar: 'SPOTIFY_ACCESS_TOKEN' },
         { id: 'env-homeassistant', name: 'HASS_TOKEN', provider: 'homeassistant', envVar: 'HASS_TOKEN' },
@@ -3829,7 +4212,6 @@ export class GatewayServer {
 
     // Check env keys
     const envMap: Record<string, string> = {
-      'env-anthropic': 'ANTHROPIC_API_KEY',
       'env-openai': 'OPENAI_API_KEY',
       'env-spotify': 'SPOTIFY_ACCESS_TOKEN',
       'env-homeassistant': 'HASS_TOKEN',
@@ -4182,6 +4564,7 @@ export class GatewayServer {
               title: `${agentId.replace('agent-', '').toUpperCase()} Recovered`,
               message: `Agent ${agentId} is responsive again`,
             });
+            this.wa.notify(`Agent ${agentId} recovered`).catch(() => {});
           }
           continue;
         }
@@ -4203,6 +4586,7 @@ export class GatewayServer {
               title: `${agentId.replace('agent-', '').toUpperCase()} Unresponsive`,
               message: `Agent ${agentId} not responding to ping`,
             });
+            this.wa.notify(`Agent ${agentId} offline`).catch(() => {});
           }
         }
       }
@@ -4323,7 +4707,7 @@ export class GatewayServer {
     'JARVIS_AUTH_TOKEN', 'NATS_TOKEN', 'NATS_USER', 'NATS_PASS',
     'REDIS_URL', 'NATS_URL', 'NODE_TLS_REJECT_UNAUTHORIZED',
     'NODE_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES',
-    'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_AI_API_KEY', 'OPENROUTER_API_KEY',
+    'OPENAI_API_KEY', 'GOOGLE_AI_API_KEY', 'OPENROUTER_API_KEY',
   ]);
 
   private static readonly BLOCKED_ENV_PREFIXES = [
@@ -4764,384 +5148,12 @@ export class GatewayServer {
     _appendChannelMessage(this.nas, channel, message);
   }
 
-  // --- WhatsApp (Baileys — QR Code Login) ---
+  // --- WhatsApp — delegated to WhatsAppBridge (this.wa) ---
 
-  // Baileys socket and login state
+  // Slack WebSocket state (kept here, not part of WhatsApp)
   private slackWs: WebSocket | null = null;
   private slackWsConnected = false;
   private slackWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-  private waSocket: ReturnType<typeof import('@whiskeysockets/baileys').makeWASocket> | null = null;
-  private waConnected = false;
-  private waQrDataUrl: string | null = null;
-  private waLoginResolvers: Array<(value: { connected: boolean; message: string }) => void> = [];
-  private waSelfJid: string | null = null;
-  /** Maps WhatsApp session IDs to JIDs for routing agent responses back via WhatsApp */
-  private waActiveChats = new Map<string, string>();
-
-  private getWhatsAppAuthDir(): string {
-    const dir = this.nas.resolve('whatsapp-auth');
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    return dir;
-  }
-
-  private getWhatsAppStatus(): {
-    connected: boolean;
-    loggedIn: boolean;
-    selfJid: string | null;
-    qrPending: boolean;
-    message: string;
-  } {
-    const authDir = this.getWhatsAppAuthDir();
-    const credsPath = join(authDir, 'creds.json');
-    const loggedIn = existsSync(credsPath);
-
-    return {
-      connected: this.waConnected,
-      loggedIn,
-      selfJid: this.waSelfJid,
-      qrPending: !!this.waQrDataUrl,
-      message: this.waConnected
-        ? `Connected as ${this.waSelfJid || 'unknown'}`
-        : loggedIn
-          ? 'Logged in but not connected. Click Connect to start.'
-          : 'Not logged in. Click "Show QR" to scan with WhatsApp.',
-    };
-  }
-
-  private async startWhatsAppLogin(force = false): Promise<{ qrDataUrl: string | null; message: string }> {
-    log.info('WhatsApp login: starting QR flow...');
-
-    // Stop existing socket
-    if (this.waSocket) {
-      try { this.waSocket.end(undefined); } catch { /* */ }
-      this.waSocket = null;
-      this.waConnected = false;
-    }
-
-    // If force, clear auth
-    if (force) {
-      const authDir = this.getWhatsAppAuthDir();
-      const credsPath = join(authDir, 'creds.json');
-      try { if (existsSync(credsPath)) unlinkSync(credsPath); } catch { /* */ }
-      log.info('WhatsApp: cleared existing auth (force relink)');
-    }
-
-    // Dynamic import for Baileys (ESM module)
-    let baileys: typeof import('@whiskeysockets/baileys');
-    try {
-      baileys = await import('@whiskeysockets/baileys');
-    } catch (err) {
-      log.error('Failed to import Baileys:', { error: String(err) });
-      return { qrDataUrl: null, message: 'Baileys library not installed. Run: pnpm add @whiskeysockets/baileys' };
-    }
-
-    let qrcode: typeof import('qrcode');
-    try {
-      qrcode = await import('qrcode');
-    } catch {
-      return { qrDataUrl: null, message: 'qrcode library not installed. Run: pnpm add qrcode' };
-    }
-
-    const authDir = this.getWhatsAppAuthDir();
-    const { state, saveCreds } = await baileys.useMultiFileAuthState(authDir);
-    const { version } = await baileys.fetchLatestBaileysVersion();
-
-    return new Promise((resolveLogin) => {
-      let qrReceived = false;
-      const timeout = setTimeout(() => {
-        if (!qrReceived) {
-          resolveLogin({ qrDataUrl: null, message: 'QR code timeout (30s). Try again.' });
-        }
-      }, 30000);
-
-      const sock = baileys!.makeWASocket({
-        auth: {
-          creds: state.creds,
-          keys: baileys!.makeCacheableSignalKeyStore(state.keys, undefined as any),
-        },
-        version,
-        printQRInTerminal: false,
-        browser: ['Jarvis 2.0', 'Desktop', '1.0.0'],
-        syncFullHistory: false,
-        markOnlineOnConnect: false,
-      });
-
-      this.waSocket = sock as any;
-
-      // Save creds on update
-      sock.ev.on('creds.update', saveCreds);
-
-      // Connection events
-      sock.ev.on('connection.update', async (update: any) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        if (qr && !qrReceived) {
-          qrReceived = true;
-          clearTimeout(timeout);
-          try {
-            // Convert QR string to base64 PNG data URL
-            const dataUrl = await qrcode!.toDataURL(qr, {
-              width: 300,
-              margin: 2,
-              color: { dark: '#000000', light: '#ffffff' },
-            });
-            this.waQrDataUrl = dataUrl;
-            log.info('WhatsApp: QR code generated, waiting for scan...');
-            resolveLogin({
-              qrDataUrl: dataUrl,
-              message: 'Scan this QR code in WhatsApp → Linked Devices → Link a Device',
-            });
-          } catch (err) {
-            log.error('QR generation failed:', { error: String(err) });
-            resolveLogin({ qrDataUrl: null, message: `QR generation failed: ${(err as Error).message}` });
-          }
-        }
-
-        if (connection === 'open') {
-          this.waConnected = true;
-          this.waQrDataUrl = null;
-          this.waSelfJid = sock.user?.id ?? null;
-          log.info(`WhatsApp connected as ${this.waSelfJid}`);
-          this.protocol.broadcast('whatsapp.connected', {
-            selfJid: this.waSelfJid,
-            timestamp: Date.now(),
-          });
-
-          // Resolve all pending login waiters
-          for (const resolve of this.waLoginResolvers) {
-            resolve({ connected: true, message: `Connected as ${this.waSelfJid}` });
-          }
-          this.waLoginResolvers = [];
-        }
-
-        if (connection === 'close') {
-          this.waConnected = false;
-          const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
-          const reason = baileys!.DisconnectReason;
-
-          log.warn(`WhatsApp disconnected (code: ${statusCode})`);
-          this.protocol.broadcast('whatsapp.disconnected', { statusCode, timestamp: Date.now() });
-
-          if (statusCode === reason.loggedOut) {
-            // Logged out — clear auth
-            log.info('WhatsApp: Logged out, clearing credentials');
-            this.waSocket = null;
-            this.waSelfJid = null;
-          } else if (statusCode === 515 || statusCode === reason.restartRequired) {
-            // Restart required after pairing — auto-reconnect
-            log.info('WhatsApp: Restart required, reconnecting...');
-            setTimeout(() => this.connectWhatsApp(), 2000);
-          } else {
-            // Other disconnect — auto-reconnect after delay
-            log.info('WhatsApp: Will reconnect in 5s...');
-            setTimeout(() => this.connectWhatsApp(), 5000);
-          }
-
-          // Resolve all pending login waiters with disconnect
-          for (const resolve of this.waLoginResolvers) {
-            resolve({ connected: false, message: `Disconnected (code: ${statusCode})` });
-          }
-          this.waLoginResolvers = [];
-        }
-      });
-
-      // Message handler
-      sock.ev.on('messages.upsert', async (upsert: any) => {
-        if (upsert.type !== 'notify') return;
-
-        for (const msg of upsert.messages) {
-          if (!msg.message || msg.key.fromMe) continue;
-
-          const from = msg.key.remoteJid ?? '';
-          // Skip status/broadcast
-          if (from === 'status@broadcast' || from.endsWith('@broadcast')) continue;
-
-          // Extract text
-          const text = msg.message.conversation
-            || msg.message.extendedTextMessage?.text
-            || '';
-          if (!text) continue;
-
-          // Extract sender name
-          const pushName = msg.pushName ?? from.split('@')[0];
-
-          const incomingMsg = {
-            id: msg.key.id ?? `wa-${Date.now()}`,
-            from,
-            fromName: pushName,
-            to: 'jarvis',
-            body: text,
-            timestamp: msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now(),
-            direction: 'incoming' as const,
-            status: 'read' as const,
-            type: 'text' as const,
-          };
-
-          this.appendChannelMessage('whatsapp', incomingMsg);
-          this.protocol.broadcast('whatsapp.message', incomingMsg);
-          log.info(`WhatsApp from ${pushName}: "${text.substring(0, 80)}"`);
-
-          // Auto-reply if enabled — route to agent for full computer control
-          const config = this.getChannelConfig('whatsapp');
-          if (config.jarvisMode) {
-            const lang = (config.autoReplyLanguage as string) ?? 'pl';
-
-            if (text.startsWith('/')) {
-              // Quick commands handled locally
-              const reply = await this.handleChannelCommand(text, lang);
-              await this.sendWhatsAppMessage({ to: from, message: reply });
-            } else {
-              // Route to agent via NATS chat — same as dashboard, gives full computer control
-              const sessionId = `whatsapp-${from.split('@')[0]}`;
-              // Evict oldest entry if the map has reached its size cap
-              if (this.waActiveChats.size >= 10_000 && !this.waActiveChats.has(sessionId)) {
-                const oldestKey = this.waActiveChats.keys().next().value;
-                if (oldestKey !== undefined) this.waActiveChats.delete(oldestKey);
-              }
-              this.waActiveChats.set(sessionId, from);
-
-              const chatMsg: ChatMessage = {
-                id: shortId(),
-                from: 'user',
-                to: 'jarvis',
-                content: `[WhatsApp from ${pushName}]: ${text}`,
-                timestamp: Date.now(),
-                metadata: { source: 'whatsapp', whatsappJid: from, sessionId, language: lang },
-              };
-
-              this.persistChatMessage(sessionId, chatMsg);
-              await this.nats.publish(NatsSubjects.chat('jarvis'), { ...chatMsg, sessionId });
-              this.protocol.broadcast('chat.message', chatMsg);
-              log.info(`WhatsApp → jarvis: "${text.substring(0, 80)}" (session: ${sessionId})`);
-            }
-          }
-        }
-      });
-
-      // If we already have creds, this socket will connect without QR
-      // Check if connection opens quickly (no QR needed)
-      const credsPath = join(authDir, 'creds.json');
-      if (existsSync(credsPath)) {
-        // Already logged in — socket should connect without QR
-        setTimeout(() => {
-          if (!qrReceived && this.waConnected) {
-            clearTimeout(timeout);
-            resolveLogin({
-              qrDataUrl: null,
-              message: `Already connected as ${this.waSelfJid}`,
-            });
-          } else if (!qrReceived && !this.waConnected) {
-            // Wait a bit longer for connection
-          }
-        }, 5000);
-      }
-    });
-  }
-
-  private async connectWhatsApp(): Promise<void> {
-    const authDir = this.getWhatsAppAuthDir();
-    const credsPath = join(authDir, 'creds.json');
-    if (!existsSync(credsPath)) {
-      log.info('WhatsApp: No credentials found, skipping auto-connect');
-      return;
-    }
-
-    // Only connect if not already connected
-    if (this.waConnected) return;
-
-    log.info('WhatsApp: Auto-connecting with saved credentials...');
-    await this.startWhatsAppLogin(false);
-  }
-
-  private async waitWhatsAppLogin(): Promise<{ connected: boolean; message: string }> {
-    if (this.waConnected) {
-      return { connected: true, message: `Already connected as ${this.waSelfJid}` };
-    }
-
-    return new Promise((resolve) => {
-      this.waLoginResolvers.push(resolve);
-      // Timeout after 120 seconds
-      setTimeout(() => {
-        const idx = this.waLoginResolvers.indexOf(resolve);
-        if (idx !== -1) {
-          this.waLoginResolvers.splice(idx, 1);
-          resolve({ connected: false, message: 'Scan timeout (120s). Try again.' });
-        }
-      }, 120000);
-    });
-  }
-
-  private async logoutWhatsApp(): Promise<{ success: boolean; message: string }> {
-    try {
-      if (this.waSocket) {
-        try { await (this.waSocket as any).logout(); } catch { /* */ }
-        try { this.waSocket.end(undefined); } catch { /* */ }
-        this.waSocket = null;
-      }
-      this.waConnected = false;
-      this.waSelfJid = null;
-      this.waQrDataUrl = null;
-
-      // Clear auth files
-      const authDir = this.getWhatsAppAuthDir();
-      try {
-        const files = readdirSync(authDir);
-        for (const file of files) {
-          try { unlinkSync(join(authDir, file)); } catch { /* */ }
-        }
-      } catch { /* */ }
-
-      log.info('WhatsApp: Logged out and cleared credentials');
-      this.protocol.broadcast('whatsapp.disconnected', { reason: 'logout', timestamp: Date.now() });
-      return { success: true, message: 'Logged out successfully. Scan QR to reconnect.' };
-    } catch (err) {
-      return { success: false, message: `Logout failed: ${(err as Error).message}` };
-    }
-  }
-
-  private async sendWhatsAppMessage(params: { to: string; message: string }): Promise<{ success: boolean; messageId?: string; error?: string }> {
-    if (!this.waSocket || !this.waConnected) {
-      return { success: false, error: 'WhatsApp not connected. Login via QR code first.' };
-    }
-
-    // Convert phone number to JID if needed
-    let jid = params.to;
-    if (!jid.includes('@')) {
-      // Clean number and add WhatsApp suffix
-      const cleaned = jid.replace(/[\s\-+()]/g, '');
-      jid = `${cleaned}@s.whatsapp.net`;
-    }
-
-    try {
-      const result = await (this.waSocket as any).sendMessage(jid, { text: params.message });
-      const msgId = result?.key?.id ?? `wa-${Date.now()}`;
-
-      // Save to history
-      this.appendChannelMessage('whatsapp', {
-        id: msgId,
-        from: 'jarvis',
-        to: jid,
-        body: params.message,
-        timestamp: Date.now(),
-        direction: 'outgoing',
-        status: 'sent',
-        type: 'text',
-      });
-
-      this.protocol.broadcast('whatsapp.sent', { to: jid, message: params.message, timestamp: Date.now() });
-      return { success: true, messageId: msgId };
-    } catch (err) {
-      log.error(`WhatsApp send error: ${(err as Error).message}`);
-      return { success: false, error: (err as Error).message };
-    }
-  }
-
-  private async handleWhatsAppWebhook(_body: Record<string, unknown>): Promise<void> {
-    // Legacy webhook handler — no longer needed with Baileys (messages come via socket events)
-    // Kept as no-op for backward compatibility
-    log.debug('WhatsApp webhook called (legacy — Baileys handles messages via socket)');
-  }
 
   // --- Telegram ---
 
@@ -5408,7 +5420,7 @@ export class GatewayServer {
       const lastMsg = msgs.messages[0];
 
       let connected = false;
-      if (channel === 'whatsapp') connected = this.waConnected;
+      if (channel === 'whatsapp') connected = this.wa.connected;
       else if (channel === 'telegram') connected = !!(config.botToken);
       else if (channel === 'discord') connected = !!(config.botToken || config.webhookUrl);
       else if (channel === 'slack') connected = this.slackWsConnected || !!(config.botToken);
@@ -5435,7 +5447,7 @@ export class GatewayServer {
     for (const channel of ['whatsapp', 'telegram', 'discord', 'slack', 'imessage']) {
       const config = this.getChannelConfig(channel);
       let connected = false;
-      if (channel === 'whatsapp') connected = this.waConnected;
+      if (channel === 'whatsapp') connected = this.wa.connected;
       else if (channel === 'telegram') connected = !!(config.botToken);
       else if (channel === 'discord') connected = !!(config.botToken || config.webhookUrl);
       else if (channel === 'slack') connected = this.slackWsConnected || !!(config.botToken);
@@ -6262,10 +6274,10 @@ end tell`;
     return {
       providers: [
         {
-          id: 'anthropic', name: 'Anthropic', type: 'anthropic',
-          baseUrl: 'https://api.anthropic.com',
-          apiKey: process.env['ANTHROPIC_API_KEY'] ? '***' : '',
-          enabled: !!process.env['ANTHROPIC_API_KEY'],
+          id: 'anthropic', name: 'Claude CLI (Max)', type: 'anthropic',
+          baseUrl: 'Claude CLI subprocess',
+          apiKey: 'Max subscription (CLI)',
+          enabled: true,
           priority: 1,
         },
         {

@@ -429,7 +429,7 @@ function binaryExists(name: string): boolean {
 /** Env vars that skills are never allowed to override */
 const BLOCKED_ENV_KEYS = new Set([
   'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'TERM',
-  'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'JARVIS_AUTH_TOKEN',
+  'OPENAI_API_KEY', 'JARVIS_AUTH_TOKEN',
   'NODE_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES',
 ]);
 

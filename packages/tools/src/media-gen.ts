@@ -16,16 +16,37 @@ import type { AgentTool, ToolContext, ToolResult } from './base.js';
 import { createToolResult, createErrorResult } from './base.js';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { createHmac } from 'node:crypto';
 
 const log = createLogger('tools:media-gen');
 
 export interface MediaGenConfig {
   readonly fluxApiKey?: string;
-  readonly klingApiKey?: string;
+  readonly klingAccessKey?: string;
+  readonly klingSecretKey?: string;
   readonly elevenLabsApiKey?: string;
   readonly heygenApiKey?: string;
   readonly runwayApiKey?: string;
   readonly nasPath?: string;
+}
+
+/** Generate a JWT token for Kling AI API (HS256) from Access Key + Secret Key */
+function generateKlingJwt(accessKey: string, secretKey: string): string {
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    iss: accessKey,
+    exp: now + 1800, // 30 min
+    nbf: now - 5,
+    iat: now,
+  };
+  const b64url = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+  const headerB64 = b64url(header);
+  const payloadB64 = b64url(payload);
+  const signature = createHmac('sha256', secretKey)
+    .update(`${headerB64}.${payloadB64}`)
+    .digest('base64url');
+  return `${headerB64}.${payloadB64}.${signature}`;
 }
 
 export class MediaGenTool implements AgentTool {
@@ -198,18 +219,19 @@ export class MediaGenTool implements AgentTool {
   private async generateVideo(
     prompt: string, product: string, aspectRatio: string, duration: number, filename: string, nasPath: string,
   ): Promise<ToolResult> {
-    if (!this.config.klingApiKey) {
-      return createErrorResult('KLING_API_KEY not configured. Add it to .env to generate videos with Kling 3.0.');
+    if (!this.config.klingAccessKey || !this.config.klingSecretKey) {
+      return createErrorResult('KLING_ACCESS_KEY / KLING_SECRET_KEY not configured. Add both to API Keys to generate videos with Kling 3.0.');
     }
 
     log.info(`Generating video via Kling 3.0: "${prompt.slice(0, 60)}..." (${duration}s, ${aspectRatio})`);
 
     try {
+      const token = generateKlingJwt(this.config.klingAccessKey, this.config.klingSecretKey);
       const response = await fetch('https://api.klingai.com/v1/videos/text2video', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.klingApiKey}`,
+          'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({
           prompt,
@@ -356,8 +378,9 @@ export class MediaGenTool implements AgentTool {
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       try {
+        const token = generateKlingJwt(this.config.klingAccessKey!, this.config.klingSecretKey!);
         const res = await fetch(`https://api.klingai.com/v1/videos/text2video/${taskId}`, {
-          headers: { 'Authorization': `Bearer ${this.config.klingApiKey}` },
+          headers: { 'Authorization': `Bearer ${token}` },
         });
         const status = await res.json() as { data?: { status?: string; video_url?: string } };
         if (status.data?.status === 'completed' && status.data.video_url) {

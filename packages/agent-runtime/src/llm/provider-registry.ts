@@ -1,6 +1,5 @@
 import { createLogger } from '@jarvis/shared';
 import type { LLMProvider, ModelInfo, ChatRequest, ChatResponse, ChatChunk } from './types.js';
-import { AnthropicProvider, type AnthropicAuthMode } from './providers/anthropic.js';
 import { ClaudeCliProvider } from './providers/claude-cli.js';
 import { OpenAIProvider } from './providers/openai.js';
 import { GoogleProvider } from './providers/google.js';
@@ -10,8 +9,6 @@ import { OpenRouterProvider } from './providers/openrouter.js';
 const log = createLogger('llm:registry');
 
 export interface ProviderRegistryConfig {
-  anthropicApiKey?: string;
-  anthropicAuthMode?: AnthropicAuthMode;
   openaiApiKey?: string;
   googleApiKey?: string;
   ollamaBaseUrl?: string;
@@ -23,7 +20,8 @@ export interface ProviderRegistryConfig {
 
 /**
  * ProviderRegistry - Central registry for all LLM providers.
- * Handles provider initialization, model resolution, and failover.
+ * Claude models use Claude Max subscription ONLY (via CLI subprocess).
+ * No API keys — all Claude usage goes through the Max subscription.
  */
 export class ProviderRegistry {
   private providers = new Map<string, LLMProvider>();
@@ -32,23 +30,18 @@ export class ProviderRegistry {
   private defaultModel: string;
 
   constructor(config: ProviderRegistryConfig) {
-    this.defaultProvider = config.defaultProvider ?? 'anthropic';
+    this.defaultProvider = config.defaultProvider ?? 'claude-cli';
     this.defaultModel = config.defaultModel ?? 'claude-opus-4-6';
 
-    // Initialize providers based on available keys
-    if (config.anthropicAuthMode === 'claude-cli') {
-      const cliProvider = new ClaudeCliProvider();
-      if (cliProvider.isAvailable()) {
-        this.registerProvider(cliProvider);
-      } else {
-        log.warn('Claude CLI not available, falling back to API key mode');
-        if (config.anthropicApiKey) {
-          this.registerProvider(new AnthropicProvider({ apiKey: config.anthropicApiKey, authMode: 'api-key' }));
-        }
-      }
-    } else if (config.anthropicApiKey) {
-      this.registerProvider(new AnthropicProvider({ apiKey: config.anthropicApiKey, authMode: 'api-key' }));
+    // Claude CLI subprocess — uses Max subscription, no API keys
+    const cliProvider = new ClaudeCliProvider();
+    if (cliProvider.isAvailable()) {
+      this.registerProvider(cliProvider);
+      log.info('Claude CLI provider registered (Max subscription, no API keys)');
+    } else {
+      log.error('Claude CLI not available! Is "claude" installed and logged in?');
     }
+
     if (config.openaiApiKey) {
       this.registerProvider(new OpenAIProvider(config.openaiApiKey));
     }
@@ -93,13 +86,8 @@ export class ProviderRegistry {
     const providerId = this.modelProviderMap.get(modelId);
     if (providerId) return this.providers.get(providerId);
 
-    // Heuristic: guess provider from model name.
-    // For claude-* models, prefer the explicit `anthropic` API-key provider when
-    // it is registered (i.e. the user configured an API key).  Only fall back to
-    // `claude-cli` when no API-key-backed anthropic provider is present.
+    // For claude-* models: use CLI (Max subscription)
     if (modelId.startsWith('claude-')) {
-      const anthropicProvider = this.providers.get('anthropic');
-      if (anthropicProvider?.isAvailable()) return anthropicProvider;
       return this.providers.get('claude-cli');
     }
     if (modelId.startsWith('gpt-') || modelId.startsWith('o1') || modelId.startsWith('o3') || modelId.startsWith('o4')) return this.providers.get('openai');
@@ -150,7 +138,7 @@ export class ProviderRegistry {
     return provider.chat({ ...request, model });
   }
 
-  /** Stream chat, auto-resolving provider from model ID */
+  /** Stream chat, auto-resolving provider */
   async *chatStream(request: ChatRequest): AsyncIterable<ChatChunk> {
     const model = request.model || this.defaultModel;
     const provider = this.resolveProvider(model);

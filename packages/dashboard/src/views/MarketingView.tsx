@@ -35,6 +35,17 @@ import {
   Key,
   Save,
   EyeOff,
+  BookOpen,
+  Globe,
+  Calendar,
+  Hash,
+  Image,
+  Video,
+  MessageCircle,
+  Play,
+  Clock as ClockIcon,
+  Trash2,
+  Plus,
 } from 'lucide-react';
 
 // ─── Types ───────────────────────────────────────────────
@@ -82,26 +93,38 @@ interface QueryResult {
   offset: number;
 }
 
-type Tab = 'dashboard' | 'campaigns' | 'content' | 'leads' | 'intel' | 'agents' | 'database' | 'api-keys';
+type Tab = 'dashboard' | 'social' | 'campaigns' | 'content' | 'leads' | 'intel' | 'agents' | 'skills' | 'database' | 'api-keys';
 
 // ─── Constants ───────────────────────────────────────────
 
 const TABS: { id: Tab; label: string; icon: typeof TrendingUp }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: BarChart3 },
+  { id: 'social', label: 'Social', icon: Globe },
   { id: 'campaigns', label: 'Campaigns', icon: Target },
   { id: 'content', label: 'Content', icon: FileText },
   { id: 'leads', label: 'Leads', icon: Users },
   { id: 'intel', label: 'Intel', icon: Eye },
   { id: 'agents', label: 'Agents', icon: Cpu },
+  { id: 'skills', label: 'Skills', icon: BookOpen },
   { id: 'database', label: 'DB', icon: Database },
   { id: 'api-keys', label: 'API Keys', icon: Key },
 ];
 
-const PRODUCTS = [
+interface Product {
+  id: string;
+  label: string;
+  color: string;
+  desc: string;
+}
+
+const DEFAULT_PRODUCTS: Product[] = [
   { id: 'okidooki', label: 'OKIDOOKI', color: '#f472b6', desc: 'Nightlife reimagined' },
   { id: 'nowtrust', label: 'NowTrust', color: '#3b82f6', desc: 'Trust & security platform' },
   { id: 'makeitfun', label: 'MakeItFun', color: '#f59e0b', desc: 'AI-powered merch & design' },
 ];
+
+// Mutable products list — loaded from gateway, falls back to defaults
+let PRODUCTS: Product[] = [...DEFAULT_PRODUCTS];
 
 const QUICK_COMMANDS = [
   { id: 'sprint', emoji: '\u{1F680}', label: 'Full Sprint', cmd: 'full marketing sprint for all products', needsProduct: false },
@@ -377,15 +400,76 @@ export function MarketingView() {
   const [customCmd, setCustomCmd] = useState('');
   const [cmdStatus, setCmdStatus] = useState<{ text: string; color: string } | null>(null);
   const [productPicker, setProductPicker] = useState<string | null>(null);
+  const [agentFeed, setAgentFeed] = useState<{ id: string; from: string; content: string; timestamp: number }[]>([]);
+  const feedRef = useRef<HTMLDivElement>(null);
+  const [feedExpanded, setFeedExpanded] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [feedPulse, setFeedPulse] = useState(false);
+  const [products, setProducts] = useState<Product[]>(DEFAULT_PRODUCTS);
+  const [showProductManager, setShowProductManager] = useState(false);
+  const [newProduct, setNewProduct] = useState<Product>({ id: '', label: '', color: '#10b981', desc: '' });
+  const [productSaveStatus, setProductSaveStatus] = useState<string | null>(null);
+
+  // Load products from gateway
+  useEffect(() => {
+    if (!connected) return;
+    gateway.request<Product[]>('marketing.products.list', {}).then(res => {
+      if (Array.isArray(res) && res.length > 0) {
+        PRODUCTS = res;
+        setProducts(res);
+      }
+    }).catch(() => { /* use defaults */ });
+  }, [connected]);
+
+  const saveProducts = useCallback(async (list: Product[]) => {
+    try {
+      await gateway.request('marketing.products.save', { products: list });
+      PRODUCTS = list;
+      setProducts(list);
+      setProductSaveStatus('Saved');
+      setTimeout(() => setProductSaveStatus(null), 2000);
+    } catch (err) {
+      setProductSaveStatus(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, []);
 
   const loadKpis = useCallback(async () => {
     try {
       const data = await gateway.request<KPIs>('marketing.db.kpis', {});
       setKpis(data);
-    } catch { /* silent */ }
+    } catch (err) { console.error('[MarketingHub]', err); }
   }, []);
 
   useEffect(() => { loadKpis(); }, [loadKpis]);
+
+  // Auto-refresh KPIs every 15 seconds
+  useEffect(() => {
+    const interval = setInterval(() => { loadKpis(); }, 15000);
+    return () => clearInterval(interval);
+  }, [loadKpis]);
+
+  // Subscribe to agent-johny chat messages for real-time response feed
+  useEffect(() => {
+    const unsub = gateway.on('chat.message', (payload: unknown) => {
+      const msg = payload as { id?: string; from?: string; to?: string; content?: string; timestamp?: number };
+      if (msg?.from === 'agent-johny' && msg.content) {
+        setAgentFeed(prev => [...prev.slice(-19), {
+          id: msg.id ?? String(Date.now()),
+          from: msg.from!,
+          content: msg.content!,
+          timestamp: msg.timestamp ?? Date.now(),
+        }]);
+        // Auto-expand feed, refresh data, pulse indicator, auto-scroll
+        setFeedExpanded(true);
+        setRefreshKey(prev => prev + 1);
+        setFeedPulse(true);
+        setTimeout(() => setFeedPulse(false), 2000);
+        loadKpis();
+        setTimeout(() => feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: 'smooth' }), 50);
+      }
+    });
+    return unsub;
+  }, [loadKpis]);
 
   const sendCommand = useCallback(async (cmd: string) => {
     setCmdStatus({ text: `Sending: ${cmd.slice(0, 60)}...`, color: '#f59e0b' });
@@ -429,7 +513,7 @@ export function MarketingView() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <TrendingUp size={20} style={{ color: '#f472b6' }} />
             <span style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 700, letterSpacing: 2, color: '#f472b6' }}>
-              MARKETING HUB v3
+              MARKETING HUB v4
             </span>
             <span style={{
               fontSize: 9, padding: '2px 6px', borderRadius: 3, fontWeight: 600, letterSpacing: 1,
@@ -440,10 +524,101 @@ export function MarketingView() {
               {connected ? 'LIVE' : 'OFFLINE'}
             </span>
           </div>
-          <button onClick={refresh} style={S.btnSecondary}>
-            <RefreshCw size={12} style={loading ? { animation: 'spin 1s linear infinite' } : {}} /> Refresh
-          </button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={() => setShowProductManager(p => !p)} style={{ ...S.btnSecondary, borderColor: showProductManager ? '#f472b6' : undefined, color: showProductManager ? '#f472b6' : undefined }}>
+              <Plus size={12} /> Products ({products.length})
+            </button>
+            <button onClick={refresh} style={S.btnSecondary}>
+              <RefreshCw size={12} style={loading ? { animation: 'spin 1s linear infinite' } : {}} /> Refresh
+            </button>
+          </div>
         </div>
+
+        {/* Product Manager */}
+        {showProductManager && (
+          <div style={{
+            marginBottom: 12, padding: 14, borderRadius: 8,
+            background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(244,114,182,0.2)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 1.5, color: '#f472b6', textTransform: 'uppercase', fontFamily: 'var(--font-display)' }}>
+                Products
+              </span>
+              {productSaveStatus && (
+                <span style={{ fontSize: 10, color: productSaveStatus.startsWith('Error') ? '#ef4444' : '#10b981', fontFamily: 'var(--font-mono)' }}>
+                  {productSaveStatus}
+                </span>
+              )}
+            </div>
+
+            {/* Existing products */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+              {products.map(p => (
+                <div key={p.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
+                  borderRadius: 6, border: `1px solid ${p.color}40`, background: `${p.color}10`,
+                }}>
+                  <div style={{ width: 10, height: 10, borderRadius: '50%', background: p.color }} />
+                  <span style={{ fontSize: 11, fontWeight: 600, color: p.color, fontFamily: 'var(--font-display)' }}>{p.label}</span>
+                  <span style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{p.desc}</span>
+                  <button
+                    onClick={() => {
+                      const updated = products.filter(x => x.id !== p.id);
+                      saveProducts(updated);
+                    }}
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)',
+                      padding: '0 2px', fontSize: 14, lineHeight: 1, display: 'flex',
+                    }}
+                    title="Remove product"
+                  >
+                    &times;
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {/* Add new product */}
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <input
+                value={newProduct.label}
+                onChange={e => setNewProduct(p => ({ ...p, label: e.target.value, id: e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '-') }))}
+                placeholder="Product name"
+                style={{ ...S.input, width: 140, fontSize: 11 }}
+              />
+              <input
+                value={newProduct.desc}
+                onChange={e => setNewProduct(p => ({ ...p, desc: e.target.value }))}
+                placeholder="Short description"
+                style={{ ...S.input, width: 180, fontSize: 11 }}
+              />
+              <input
+                type="color"
+                value={newProduct.color}
+                onChange={e => setNewProduct(p => ({ ...p, color: e.target.value }))}
+                style={{ width: 30, height: 28, border: 'none', background: 'none', cursor: 'pointer', padding: 0 }}
+              />
+              <button
+                onClick={() => {
+                  if (!newProduct.label.trim()) return;
+                  const updated = [...products, { ...newProduct, id: newProduct.id || newProduct.label.toLowerCase().replace(/[^a-z0-9]+/g, '-') }];
+                  saveProducts(updated);
+                  setNewProduct({ id: '', label: '', color: '#10b981', desc: '' });
+                }}
+                disabled={!newProduct.label.trim()}
+                style={{
+                  ...S.btnSecondary,
+                  borderColor: newProduct.label.trim() ? '#10b981' : undefined,
+                  color: newProduct.label.trim() ? '#10b981' : undefined,
+                  padding: '4px 12px', fontSize: 10,
+                  opacity: newProduct.label.trim() ? 1 : 0.4,
+                }}
+              >
+                <Plus size={11} /> Add
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* KPI Strip — 8 chips */}
         {kpis && !isEmpty && (
@@ -528,6 +703,52 @@ export function MarketingView() {
           </div>
         )}
 
+        {/* Agent Response Feed */}
+        {agentFeed.length > 0 && (
+          <div style={{ marginBottom: 8 }}>
+            <div
+              onClick={() => setFeedExpanded(prev => !prev)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                padding: '6px 10px', background: 'rgba(0,0,0,0.25)', borderRadius: feedExpanded ? '8px 8px 0 0' : 8,
+                border: `1px solid ${feedPulse ? 'rgba(244,114,182,0.6)' : 'rgba(244,114,182,0.15)'}`,
+                borderBottom: feedExpanded ? 'none' : undefined,
+                boxShadow: feedPulse ? '0 0 12px rgba(244,114,182,0.3)' : 'none',
+                transition: 'border-color 0.3s, box-shadow 0.3s',
+              }}
+            >
+              {feedExpanded ? <ChevronDown size={12} style={{ color: '#f472b6' }} /> : <ChevronRight size={12} style={{ color: '#f472b6' }} />}
+              <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: 1.5, color: '#f472b6', textTransform: 'uppercase', fontFamily: 'var(--font-display)' }}>
+                Agent Johny Responses ({agentFeed.length})
+              </span>
+              <span style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginLeft: 'auto' }}>
+                {new Date(agentFeed[agentFeed.length - 1].timestamp).toLocaleTimeString()}
+              </span>
+            </div>
+            {feedExpanded && (
+              <div
+                ref={feedRef}
+                style={{
+                  maxHeight: 500, overflow: 'auto',
+                  background: 'rgba(0,0,0,0.25)', borderRadius: '0 0 8px 8px',
+                  border: '1px solid rgba(244,114,182,0.15)', borderTop: 'none', padding: '6px 10px',
+                }}
+              >
+                {agentFeed.map(msg => (
+                  <div key={msg.id} style={{ padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.04)', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                    <span style={{ fontSize: 9, color: 'var(--text-muted)', flexShrink: 0, fontFamily: 'var(--font-mono)', marginTop: 2 }}>
+                      {new Date(msg.timestamp).toLocaleTimeString()}
+                    </span>
+                    <span style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {msg.content}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Tabs */}
         <div style={{ display: 'flex', gap: 2, borderBottom: '1px solid var(--border-primary)' }}>
           {TABS.map(t => (
@@ -554,15 +775,26 @@ export function MarketingView() {
       {/* Tab Content */}
       <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px 20px' }}>
         {isEmpty ? (
-          <EmptyState onInit={() => sendCommand('init database')} />
+          <EmptyState onInit={async () => {
+            setCmdStatus({ text: 'Initializing database...', color: '#f59e0b' });
+            try {
+              const res = await gateway.request<{ success: boolean; tables: string[] }>('marketing.db.init', {});
+              setCmdStatus({ text: `Database initialized — ${res.tables?.length ?? 12} tables created`, color: '#10b981' });
+              setTimeout(() => { setCmdStatus(null); loadKpis(); }, 1500);
+            } catch (err) {
+              setCmdStatus({ text: `Init failed: ${err instanceof Error ? err.message : String(err)}`, color: '#ef4444' });
+            }
+          }} />
         ) : (
           <>
-            {tab === 'dashboard' && <DashboardTab kpis={kpis} />}
-            {tab === 'campaigns' && <CampaignsTab />}
-            {tab === 'content' && <ContentTab />}
-            {tab === 'leads' && <LeadsTab />}
-            {tab === 'intel' && <IntelTab />}
-            {tab === 'agents' && <AgentsTab />}
+            {tab === 'dashboard' && <DashboardTab kpis={kpis} refreshKey={refreshKey} />}
+            {tab === 'social' && <SocialTab />}
+            {tab === 'campaigns' && <CampaignsTab refreshKey={refreshKey} />}
+            {tab === 'content' && <ContentTab refreshKey={refreshKey} />}
+            {tab === 'leads' && <LeadsTab refreshKey={refreshKey} />}
+            {tab === 'intel' && <IntelTab refreshKey={refreshKey} />}
+            {tab === 'agents' && <AgentsTab refreshKey={refreshKey} />}
+            {tab === 'skills' && <SkillsTab />}
             {tab === 'database' && <DatabaseTab />}
             {tab === 'api-keys' && <ApiKeysTab />}
           </>
@@ -605,11 +837,11 @@ function EmptyState({ onInit }: { onInit: () => void }) {
     }}>
       <Database size={48} style={{ color: '#f472b6', opacity: 0.5 }} />
       <div style={{ fontFamily: 'var(--font-display)', fontSize: 18, fontWeight: 700, color: 'var(--text-white)', letterSpacing: 1 }}>
-        Marketing Hub v3
+        Marketing Hub v4
       </div>
       <div style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', maxWidth: 400, lineHeight: 1.6 }}>
-        No marketing database found. Click below to initialize the SQLite database with 10 tables:
-        trends, viral_tracker, competitors, audience_insights, content_library, leads, campaigns, market_data, chatbot_kb, performance_log.
+        No marketing database found. Click below to initialize the SQLite database with 12 tables:
+        trends, viral_tracker, competitors, audience_insights, content_library, leads, campaigns, market_data, chatbot_kb, performance_log, media_assets, email_campaigns.
       </div>
       <button onClick={onInit} style={{ ...S.btnPrimary, padding: '14px 28px', fontSize: 14 }}>
         <Database size={16} /> Initialize Database
@@ -620,7 +852,7 @@ function EmptyState({ onInit }: { onInit: () => void }) {
 
 // ─── Dashboard Tab ───────────────────────────────────────
 
-function DashboardTab({ kpis }: { kpis: KPIs | null }) {
+function DashboardTab({ kpis, refreshKey }: { kpis: KPIs | null; refreshKey: number }) {
   const [topCampaigns, setTopCampaigns] = useState<Record<string, unknown>[]>([]);
   const [recentLeads, setRecentLeads] = useState<Record<string, unknown>[]>([]);
   const [recentContent, setRecentContent] = useState<Record<string, unknown>[]>([]);
@@ -633,15 +865,15 @@ function DashboardTab({ kpis }: { kpis: KPIs | null }) {
           gateway.request<QueryResult>('marketing.db.query', { table: 'campaigns', limit: 5, orderBy: 'revenue DESC' }),
           gateway.request<QueryResult>('marketing.db.query', { table: 'leads', limit: 5, orderBy: 'score DESC' }),
           gateway.request<QueryResult>('marketing.db.query', { table: 'content_library', limit: 5, orderBy: 'created_at DESC' }),
-          gateway.request<QueryResult>('marketing.db.query', { table: 'performance_log', limit: 10, orderBy: 'timestamp DESC' }),
+          gateway.request<QueryResult>('marketing.db.query', { table: 'performance_log', limit: 10, orderBy: 'logged_at DESC' }),
         ]);
         setTopCampaigns(c.rows);
         setRecentLeads(l.rows);
         setRecentContent(ct.rows);
         setRecentActions(a.rows);
-      } catch { /* silent */ }
+      } catch (err) { console.error('[MarketingHub]', err); }
     })();
-  }, []);
+  }, [refreshKey]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -749,7 +981,7 @@ function DashboardTab({ kpis }: { kpis: KPIs | null }) {
                   {String(a.description ?? '—')}
                 </div>
                 <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 2 }}>
-                  {String(a.agent ?? '—')} · {a.timestamp ? fmtRelative(String(a.timestamp)) : '—'}
+                  {String(a.agent ?? '—')} · {a.logged_at ? fmtRelative(String(a.logged_at)) : '—'}
                 </div>
               </div>
             </div>
@@ -762,7 +994,7 @@ function DashboardTab({ kpis }: { kpis: KPIs | null }) {
 
 // ─── Campaigns Tab ───────────────────────────────────────
 
-function CampaignsTab() {
+function CampaignsTab({ refreshKey }: { refreshKey: number }) {
   const [data, setData] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -771,11 +1003,11 @@ function CampaignsTab() {
     try {
       const res = await gateway.request<QueryResult>('marketing.db.query', { table: 'campaigns', limit: 100 });
       setData(res.rows);
-    } catch { /* */ }
+    } catch (err) { console.error('[MarketingHub]', err); }
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, refreshKey]);
 
   const grouped = useMemo(() => {
     const g: Record<string, Record<string, unknown>[]> = { active: [], draft: [], paused: [], completed: [] };
@@ -853,7 +1085,7 @@ function CampaignsTab() {
 
 // ─── Content Tab ─────────────────────────────────────────
 
-function ContentTab() {
+function ContentTab({ refreshKey }: { refreshKey: number }) {
   const [data, setData] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState({ product: '', platform: '', status: '' });
@@ -866,11 +1098,11 @@ function ContentTab() {
         table: 'content_library', limit: 100, orderBy: 'created_at DESC',
       });
       setData(res.rows);
-    } catch { /* */ }
+    } catch (err) { console.error('[MarketingHub]', err); }
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, refreshKey]);
 
   const filtered = useMemo(() => {
     let items = data;
@@ -963,7 +1195,7 @@ function ContentTab() {
 
 // ─── Leads Tab ───────────────────────────────────────────
 
-function LeadsTab() {
+function LeadsTab({ refreshKey }: { refreshKey: number }) {
   const [data, setData] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -976,11 +1208,11 @@ function LeadsTab() {
         table: 'leads', limit: 200, orderBy: 'score DESC',
       });
       setData(res.rows);
-    } catch { /* */ }
+    } catch (err) { console.error('[MarketingHub]', err); }
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, refreshKey]);
 
   // Pipeline funnel
   const pipeline = useMemo(() => {
@@ -1107,7 +1339,7 @@ function LeadsTab() {
 
 // ─── Intel Tab ───────────────────────────────────────────
 
-function IntelTab() {
+function IntelTab({ refreshKey }: { refreshKey: number }) {
   const [trends, setTrends] = useState<Record<string, unknown>[]>([]);
   const [viral, setViral] = useState<Record<string, unknown>[]>([]);
   const [competitors, setCompetitors] = useState<Record<string, unknown>[]>([]);
@@ -1127,9 +1359,9 @@ function IntelTab() {
         setViral(v.rows);
         setCompetitors(c.rows);
         setInsights(ins.rows);
-      } catch { /* */ }
+      } catch (err) { console.error('[MarketingHub]', err); }
     })();
-  }, []);
+  }, [refreshKey]);
 
   const toggleSection = (key: string) => setExpanded(prev => ({ ...prev, [key]: !prev[key] }));
 
@@ -1244,7 +1476,7 @@ function IntelSection({ title, icon, open, onToggle, children }: {
 
 // ─── Agents Tab ──────────────────────────────────────────
 
-function AgentsTab() {
+function AgentsTab({ refreshKey }: { refreshKey: number }) {
   const [agentStats, setAgentStats] = useState<AgentStats[]>([]);
 
   useEffect(() => {
@@ -1252,9 +1484,9 @@ function AgentsTab() {
       try {
         const stats = await gateway.request<AgentStats[]>('marketing.db.agents', {});
         setAgentStats(stats);
-      } catch { /* */ }
+      } catch (err) { console.error('[MarketingHub]', err); }
     })();
-  }, []);
+  }, [refreshKey]);
 
   const statsMap = useMemo(() => {
     const m: Record<string, AgentStats> = {};
@@ -1330,6 +1562,895 @@ function AgentsTab() {
   );
 }
 
+// ─── Skills Tab ─────────────────────────────────────────
+
+interface SkillInfo {
+  id: string;
+  title: string;
+  category: string;
+  hasEvals: boolean;
+  hasReferences: boolean;
+  lines: number;
+}
+
+const CATEGORY_COLORS: Record<string, string> = {
+  'CRO': '#f472b6',
+  'Content & Copy': '#60a5fa',
+  'SEO & Discovery': '#34d399',
+  'Paid & Measurement': '#fbbf24',
+  'Growth & Retention': '#a78bfa',
+  'Strategy': '#f97316',
+  'Sales & RevOps': '#22d3ee',
+  'Foundation': '#00ff41',
+};
+
+function SkillsTab() {
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [content, setContent] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await gateway.request<SkillInfo[]>('marketing.skills.list', {});
+        setSkills(data);
+      } catch (err) { console.error('[MarketingHub]', err); }
+    })();
+  }, []);
+
+  const loadSkill = useCallback(async (id: string) => {
+    setSelected(id);
+    setLoading(true);
+    try {
+      const res = await gateway.request<{ id: string; content: string }>('marketing.skills.read', { id });
+      setContent(res.content);
+    } catch {
+      setContent('Failed to load skill.');
+    }
+    setLoading(false);
+  }, []);
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, SkillInfo[]>();
+    const filtered = skills.filter(s =>
+      !filter || s.id.includes(filter.toLowerCase()) || s.title.toLowerCase().includes(filter.toLowerCase()) || s.category.toLowerCase().includes(filter.toLowerCase())
+    );
+    for (const s of filtered) {
+      const list = map.get(s.category) || [];
+      list.push(s);
+      map.set(s.category, list);
+    }
+    return map;
+  }, [skills, filter]);
+
+  if (selected) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, height: '100%' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button onClick={() => { setSelected(null); setContent(''); }} style={{ ...S.btnGhost, padding: '4px 10px', fontSize: 11 }}>
+            <ChevronLeft size={12} /> Back
+          </button>
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 700, color: 'var(--text-white)', letterSpacing: 1 }}>
+            {selected}
+          </span>
+        </div>
+        <div style={{
+          flex: 1, overflow: 'auto', background: 'rgba(0,0,0,0.3)', borderRadius: 8,
+          border: '1px solid var(--border)', padding: 16, fontSize: 12, lineHeight: 1.7,
+          color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap',
+        }}>
+          {loading ? 'Loading...' : content}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <BookOpen size={16} style={{ color: '#f472b6' }} />
+        <span style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 700, color: 'var(--text-white)', letterSpacing: 1 }}>
+          MARKETING SKILLS LIBRARY
+        </span>
+        <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+          {skills.length} skills from coreyhaines31/marketingskills
+        </span>
+      </div>
+
+      <input
+        type="text"
+        placeholder="Filter skills..."
+        value={filter}
+        onChange={e => setFilter(e.target.value)}
+        style={{ ...S.input, maxWidth: 300, fontSize: 11 }}
+      />
+
+      {Array.from(grouped.entries()).map(([category, items]) => (
+        <div key={category} style={{ marginBottom: 8 }}>
+          <div style={{
+            fontSize: 10, fontWeight: 700, letterSpacing: 1.5, textTransform: 'uppercase',
+            color: CATEGORY_COLORS[category] ?? '#888', marginBottom: 6,
+            fontFamily: 'var(--font-display)',
+          }}>
+            {category} ({items.length})
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 8 }}>
+            {items.map(skill => (
+              <button
+                key={skill.id}
+                onClick={() => loadSkill(skill.id)}
+                style={{
+                  background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)',
+                  borderRadius: 6, padding: '8px 12px', textAlign: 'left', cursor: 'pointer',
+                  transition: 'border-color 0.15s',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.borderColor = CATEGORY_COLORS[category] ?? '#666')}
+                onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border)')}
+              >
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-white)', marginBottom: 2, fontFamily: 'var(--font-ui)' }}>
+                  {skill.title}
+                </div>
+                <div style={{ display: 'flex', gap: 8, fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                  <span>{skill.id}</span>
+                  <span>{skill.lines} lines</span>
+                  {skill.hasEvals && <span style={{ color: '#34d399' }}>evals</span>}
+                  {skill.hasReferences && <span style={{ color: '#60a5fa' }}>refs</span>}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Social Tab ──────────────────────────────────────────
+
+const SOCIAL_PLATFORMS = [
+  { id: 'twitter', label: 'Twitter', color: '#1DA1F2', icon: Hash },
+  { id: 'instagram', label: 'Instagram', color: '#E4405F', icon: Image },
+  { id: 'facebook', label: 'Facebook', color: '#1877F2', icon: Globe },
+  { id: 'linkedin', label: 'LinkedIn', color: '#0A66C2', icon: MessageCircle },
+  { id: 'tiktok', label: 'TikTok', color: '#ffffff', icon: Play },
+  { id: 'reddit', label: 'Reddit', color: '#FF4500', icon: MessageCircle },
+] as const;
+
+interface ScheduledPost {
+  id: string;
+  platform: string;
+  text: string;
+  scheduled_at: string;
+  post_type?: string;
+  media_url?: string;
+  status?: string;
+}
+
+interface SocialConfig {
+  twitter: boolean;
+  instagram: boolean;
+  facebook: boolean;
+  linkedin: boolean;
+  tiktok: boolean;
+  reddit: boolean;
+  flux: boolean;
+  kling: boolean;
+  elevenlabs: boolean;
+  heygen: boolean;
+  brevo: boolean;
+  resend: boolean;
+  apollo: boolean;
+}
+
+function SocialTab() {
+  // ─── State ─────────────────────────────────────────
+  const [config, setConfig] = useState<SocialConfig | null>(null);
+  const [configLoading, setConfigLoading] = useState(true);
+
+  const [postText, setPostText] = useState('');
+  const [selectedPlatforms, setSelectedPlatforms] = useState<Set<string>>(new Set());
+  const [selectedProduct, setSelectedProduct] = useState<string>('');
+  const [posting, setPosting] = useState(false);
+  const [postStatus, setPostStatus] = useState<{ text: string; color: string } | null>(null);
+
+
+  const [scheduleDate, setScheduleDate] = useState('');
+
+  const [scheduled, setScheduled] = useState<ScheduledPost[]>([]);
+  const [scheduledLoading, setScheduledLoading] = useState(false);
+
+  const [lastCommand, setLastCommand] = useState<{ cmd: string; status: string; time: string } | null>(null);
+
+  // Media source picker
+  type MediaMode = 'auto' | 'folder' | 'database';
+  const [mediaMode, setMediaMode] = useState<MediaMode>('auto');
+  const [mediaFolder, setMediaFolder] = useState('/Volumes/Public/jarvis-nas/media');
+  const [folderFiles, setFolderFiles] = useState<{ name: string; path: string; size: number; type: 'image' | 'video' }[]>([]);
+  const [folderLoading, setFolderLoading] = useState(false);
+  const [selectedMedia, setSelectedMedia] = useState<Set<string>>(new Set());
+  const [dbMedia, setDbMedia] = useState<{ id: string; filename: string; path: string; type: string; product: string }[]>([]);
+  const [dbMediaLoading, setDbMediaLoading] = useState(false);
+
+  // ─── Data fetching ─────────────────────────────────
+  const fetchConfig = useCallback(async () => {
+    try {
+      setConfigLoading(true);
+      const res = await gateway.request<SocialConfig>('social.config', {});
+      setConfig(res);
+    } catch (err) {
+      console.error('Failed to fetch social config:', err);
+    } finally {
+      setConfigLoading(false);
+    }
+  }, []);
+
+  const fetchScheduled = useCallback(async () => {
+    try {
+      setScheduledLoading(true);
+      const res = await gateway.request<ScheduledPost[]>('social.schedule.list', {});
+      setScheduled(Array.isArray(res) ? res : []);
+    } catch (err) {
+      console.error('Failed to fetch scheduled posts:', err);
+    } finally {
+      setScheduledLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchConfig();
+    fetchScheduled();
+  }, [fetchConfig, fetchScheduled]);
+
+  // Auto-refresh scheduled queue every 30s
+  useEffect(() => {
+    const interval = setInterval(fetchScheduled, 30000);
+    return () => clearInterval(interval);
+  }, [fetchScheduled]);
+
+  // ─── Actions ───────────────────────────────────────
+  const togglePlatform = useCallback((platformId: string) => {
+    setSelectedPlatforms(prev => {
+      const next = new Set(prev);
+      if (next.has(platformId)) next.delete(platformId);
+      else next.add(platformId);
+      return next;
+    });
+  }, []);
+
+  const handlePost = useCallback(async () => {
+    if (!postText.trim() || selectedPlatforms.size === 0) {
+      setPostStatus({ text: 'Select at least one platform and enter text', color: '#ef4444' });
+      return;
+    }
+    setPosting(true);
+    setPostStatus(null);
+    try {
+      const platforms = Array.from(selectedPlatforms);
+      for (const platform of platforms) {
+        await gateway.request('social.post', {
+          platform,
+          text: postText.trim(),
+          ...(selectedProduct ? { product: selectedProduct } : {}),
+        });
+      }
+      setPostStatus({ text: `Posted to ${platforms.join(', ')} successfully`, color: '#10b981' });
+      setPostText('');
+      setSelectedPlatforms(new Set());
+    } catch (err) {
+      setPostStatus({ text: `Post failed: ${err instanceof Error ? err.message : String(err)}`, color: '#ef4444' });
+    } finally {
+      setPosting(false);
+    }
+  }, [postText, selectedPlatforms, selectedProduct]);
+
+  const handleSchedule = useCallback(async () => {
+    if (!postText.trim() || selectedPlatforms.size === 0 || !scheduleDate) {
+      setPostStatus({ text: 'Select platform(s), enter text, and pick a date', color: '#ef4444' });
+      return;
+    }
+    setPosting(true);
+    setPostStatus(null);
+    try {
+      const platforms = Array.from(selectedPlatforms);
+      for (const platform of platforms) {
+        await gateway.request('social.schedule', {
+          platform,
+          text: postText.trim(),
+          scheduled_at: new Date(scheduleDate).toISOString(),
+          ...(selectedProduct ? { product: selectedProduct } : {}),
+        });
+      }
+      setPostStatus({ text: `Scheduled for ${platforms.join(', ')}`, color: '#10b981' });
+      setPostText('');
+      setSelectedPlatforms(new Set());
+      setScheduleDate('');
+      fetchScheduled();
+    } catch (err) {
+      setPostStatus({ text: `Schedule failed: ${err instanceof Error ? err.message : String(err)}`, color: '#ef4444' });
+    } finally {
+      setPosting(false);
+    }
+  }, [postText, selectedPlatforms, scheduleDate, selectedProduct, fetchScheduled]);
+
+  const cancelScheduled = useCallback(async (postId: string) => {
+    try {
+      await gateway.request('social.schedule.cancel', { post_id: postId });
+      setScheduled(prev => prev.filter(p => p.id !== postId));
+    } catch (err) {
+      console.error('Failed to cancel scheduled post:', err);
+    }
+  }, []);
+
+  const sendAgentCommand = useCallback(async (command: string) => {
+    const ts = new Date().toLocaleTimeString();
+    setLastCommand({ cmd: command, status: 'Sending...', time: ts });
+    try {
+      await gateway.request('marketing.command', { command });
+      setLastCommand({ cmd: command, status: 'Sent to agent-johny', time: ts });
+    } catch (err) {
+      setLastCommand({ cmd: command, status: `Failed: ${err instanceof Error ? err.message : String(err)}`, time: ts });
+    }
+  }, []);
+
+  const browseFolder = useCallback(async (path: string) => {
+    setFolderLoading(true);
+    try {
+      const res = await gateway.request<{ files: { name: string; path: string; size: number; type: 'image' | 'video' }[] }>('social.media.browse', { path });
+      setFolderFiles(res?.files ?? []);
+    } catch (err) {
+      console.error('Browse failed:', err);
+      setFolderFiles([]);
+    } finally {
+      setFolderLoading(false);
+    }
+  }, []);
+
+  const fetchDbMedia = useCallback(async () => {
+    setDbMediaLoading(true);
+    try {
+      const res = await gateway.request<{ rows: { id: string; filename: string; file_path: string; media_type: string; product: string }[] }>('marketing.db.query', { table: 'media_assets', limit: 50, orderBy: 'created_at DESC' });
+      setDbMedia((res?.rows ?? []).map(r => ({ id: String(r.id), filename: r.filename, path: r.file_path, type: r.media_type, product: r.product })));
+    } catch {
+      setDbMedia([]);
+    } finally {
+      setDbMediaLoading(false);
+    }
+  }, []);
+
+  const toggleMediaFile = useCallback((path: string) => {
+    setSelectedMedia(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  // Build media instruction string for agent commands
+  const getMediaInstruction = useCallback(() => {
+    if (mediaMode === 'auto') return 'MEDIA: Auto-generate all visuals — image with image_generate (Flux Pro), video with media_generate (Kling 3.0). NEVER post without media.';
+    if (mediaMode === 'folder' && selectedMedia.size > 0) {
+      const paths = Array.from(selectedMedia);
+      return `MEDIA: Use these specific files from the user's folder: ${paths.join(', ')}. Attach them to the post. If more visuals needed, generate additional with image_generate.`;
+    }
+    if (mediaMode === 'folder' && mediaFolder) {
+      return `MEDIA: Browse folder "${mediaFolder}" using file_read/file_search tools, pick the best/most relevant images and videos for the post. Attach them. If folder is empty or no suitable media, generate with image_generate.`;
+    }
+    if (mediaMode === 'database' && selectedMedia.size > 0) {
+      const paths = Array.from(selectedMedia);
+      return `MEDIA: Use these existing assets from media_assets database: ${paths.join(', ')}. Attach them to the post. If more visuals needed, generate additional with image_generate.`;
+    }
+    return 'MEDIA: Auto-generate all visuals — image with image_generate (Flux Pro). NEVER post without media.';
+  }, [mediaMode, selectedMedia, mediaFolder]);
+
+  // ─── Render ────────────────────────────────────────
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+      {/* ── A) Platform Connection Status ── */}
+      <div>
+        <div style={{ ...S.sectionTitle, marginBottom: 12 }}>Platform Connections</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+          {configLoading ? (
+            <span style={S.muted}>Loading platforms...</span>
+          ) : (
+            SOCIAL_PLATFORMS.map(p => {
+              const connected = config?.[p.id as keyof SocialConfig] ?? false;
+              return (
+                <div
+                  key={p.id}
+                  style={{
+                    ...S.card,
+                    padding: '10px 16px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    minWidth: 140,
+                    cursor: 'pointer',
+                    borderColor: connected ? `${p.color}50` : undefined,
+                    background: connected ? `${p.color}10` : undefined,
+                  }}
+                  onClick={() => {
+                    // Could open config modal in future
+                  }}
+                >
+                  <p.icon size={16} style={{ color: connected ? p.color : '#6b7280' }} />
+                  <span style={{ fontSize: 12, fontWeight: 600, color: connected ? p.color : '#6b7280', fontFamily: 'var(--font-display)' }}>
+                    {p.label}
+                  </span>
+                  {connected ? (
+                    <CheckCircle size={14} style={{ color: '#10b981', marginLeft: 'auto' }} />
+                  ) : (
+                    <AlertCircle size={14} style={{ color: '#6b7280', marginLeft: 'auto' }} />
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      {/* ── B) AI Auto Composer ── */}
+      <div style={S.card}>
+        <div style={{ ...S.sectionTitle, marginBottom: 4 }}>AI Auto Composer</div>
+        <div style={{ ...S.muted, marginBottom: 14, fontSize: 10 }}>Select product & platforms, AI generates and publishes automatically.</div>
+
+        {/* Product selector */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ ...S.muted, marginBottom: 6 }}>Product</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {PRODUCTS.map(p => {
+              const active = selectedProduct === p.id;
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => setSelectedProduct(active ? '' : p.id)}
+                  style={{
+                    padding: '8px 16px', fontSize: 12, fontWeight: 700,
+                    fontFamily: 'var(--font-display)', letterSpacing: 0.5,
+                    border: `1px solid ${active ? '#f472b6' : 'var(--border-primary)'}`,
+                    borderRadius: 6, cursor: 'pointer',
+                    background: active ? 'rgba(244,114,182,0.15)' : 'rgba(255,255,255,0.04)',
+                    color: active ? '#f472b6' : 'var(--text-muted)',
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Platform toggles */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <span style={S.muted}>Platforms</span>
+            <button
+              onClick={() => {
+                if (selectedPlatforms.size === SOCIAL_PLATFORMS.length) {
+                  setSelectedPlatforms(new Set());
+                } else {
+                  setSelectedPlatforms(new Set(SOCIAL_PLATFORMS.map(p => p.id)));
+                }
+              }}
+              style={{ fontSize: 9, color: '#f472b6', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-display)', letterSpacing: 0.5 }}
+            >
+              {selectedPlatforms.size === SOCIAL_PLATFORMS.length ? 'DESELECT ALL' : 'SELECT ALL'}
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {SOCIAL_PLATFORMS.map(p => {
+              const active = selectedPlatforms.has(p.id);
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => togglePlatform(p.id)}
+                  style={{
+                    padding: '6px 12px', fontSize: 11, fontWeight: 600,
+                    fontFamily: 'var(--font-display)', letterSpacing: 0.5,
+                    border: `1px solid ${active ? p.color : 'var(--border-primary)'}`,
+                    borderRadius: 6, cursor: 'pointer',
+                    background: active ? `${p.color}20` : 'rgba(255,255,255,0.04)',
+                    color: active ? p.color : 'var(--text-muted)',
+                    display: 'inline-flex', alignItems: 'center', gap: 5,
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  <p.icon size={12} />
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Media Source Picker */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ ...S.muted, marginBottom: 6 }}>Media Source</div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+            {([
+              { id: 'auto' as MediaMode, label: 'AI Auto-Generate', icon: Zap, color: '#f472b6' },
+              { id: 'folder' as MediaMode, label: 'From Folder', icon: Image, color: '#3b82f6' },
+              { id: 'database' as MediaMode, label: 'From Database', icon: Database, color: '#8b5cf6' },
+            ]).map(m => {
+              const active = mediaMode === m.id;
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => {
+                    setMediaMode(m.id);
+                    setSelectedMedia(new Set());
+                    if (m.id === 'folder') browseFolder(mediaFolder);
+                    if (m.id === 'database') fetchDbMedia();
+                  }}
+                  style={{
+                    padding: '6px 14px', fontSize: 11, fontWeight: 600,
+                    fontFamily: 'var(--font-display)', letterSpacing: 0.5,
+                    border: `1px solid ${active ? m.color : 'var(--border-primary)'}`,
+                    borderRadius: 6, cursor: 'pointer',
+                    background: active ? `${m.color}20` : 'rgba(255,255,255,0.04)',
+                    color: active ? m.color : 'var(--text-muted)',
+                    display: 'inline-flex', alignItems: 'center', gap: 5,
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  <m.icon size={12} />
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Folder browser */}
+          {mediaMode === 'folder' && (
+            <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, border: '1px solid var(--border-primary)', padding: 10 }}>
+              <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                <input
+                  value={mediaFolder}
+                  onChange={e => setMediaFolder(e.target.value)}
+                  placeholder="/Volumes/Public/jarvis-nas/media"
+                  style={{ ...S.input, flex: 1, fontSize: 11, fontFamily: 'var(--font-mono)' }}
+                  onKeyDown={e => { if (e.key === 'Enter') browseFolder(mediaFolder); }}
+                />
+                <button
+                  onClick={() => browseFolder(mediaFolder)}
+                  disabled={folderLoading}
+                  style={{ ...S.btnSecondary, padding: '4px 10px', fontSize: 10 }}
+                >
+                  <Search size={11} />
+                  Browse
+                </button>
+              </div>
+              {folderLoading ? (
+                <span style={{ ...S.muted, fontSize: 10 }}>Loading...</span>
+              ) : folderFiles.length === 0 ? (
+                <span style={{ ...S.muted, fontSize: 10 }}>No media files found. Enter a folder path and click Browse.</span>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                    <span style={{ ...S.muted, fontSize: 10 }}>{folderFiles.length} files found</span>
+                    {selectedMedia.size > 0 && (
+                      <span style={{ fontSize: 10, color: '#10b981', fontFamily: 'var(--font-mono)' }}>
+                        {selectedMedia.size} selected
+                      </span>
+                    )}
+                    <button
+                      onClick={() => {
+                        if (selectedMedia.size === folderFiles.length) setSelectedMedia(new Set());
+                        else setSelectedMedia(new Set(folderFiles.map(f => f.path)));
+                      }}
+                      style={{ fontSize: 9, color: '#3b82f6', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-display)' }}
+                    >
+                      {selectedMedia.size === folderFiles.length ? 'DESELECT ALL' : 'SELECT ALL'}
+                    </button>
+                  </div>
+                  <div style={{ maxHeight: 160, overflow: 'auto', display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {folderFiles.map(f => {
+                      const sel = selectedMedia.has(f.path);
+                      return (
+                        <button
+                          key={f.path}
+                          onClick={() => toggleMediaFile(f.path)}
+                          style={{
+                            padding: '4px 8px', fontSize: 10, fontFamily: 'var(--font-mono)',
+                            border: `1px solid ${sel ? (f.type === 'video' ? '#f59e0b' : '#3b82f6') : 'var(--border-dim)'}`,
+                            borderRadius: 4, cursor: 'pointer',
+                            background: sel ? (f.type === 'video' ? 'rgba(245,158,11,0.15)' : 'rgba(59,130,246,0.15)') : 'rgba(255,255,255,0.03)',
+                            color: sel ? (f.type === 'video' ? '#f59e0b' : '#3b82f6') : 'var(--text-muted)',
+                            display: 'flex', alignItems: 'center', gap: 4,
+                          }}
+                        >
+                          {f.type === 'video' ? <Video size={10} /> : <Image size={10} />}
+                          {f.name}
+                          <span style={{ fontSize: 8, opacity: 0.6 }}>{(f.size / 1024 / 1024).toFixed(1)}MB</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Database media browser */}
+          {mediaMode === 'database' && (
+            <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 8, border: '1px solid var(--border-primary)', padding: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <span style={{ ...S.muted, fontSize: 10 }}>media_assets table</span>
+                <button onClick={fetchDbMedia} disabled={dbMediaLoading} style={{ ...S.btnSecondary, padding: '2px 8px', fontSize: 9 }}>
+                  <RefreshCw size={10} style={dbMediaLoading ? { animation: 'spin 1s linear infinite' } : undefined} />
+                  Refresh
+                </button>
+                {selectedMedia.size > 0 && (
+                  <span style={{ fontSize: 10, color: '#10b981', fontFamily: 'var(--font-mono)', marginLeft: 'auto' }}>
+                    {selectedMedia.size} selected
+                  </span>
+                )}
+              </div>
+              {dbMediaLoading ? (
+                <span style={{ ...S.muted, fontSize: 10 }}>Loading...</span>
+              ) : dbMedia.length === 0 ? (
+                <span style={{ ...S.muted, fontSize: 10 }}>No assets in media_assets table. Run a content batch to generate some.</span>
+              ) : (
+                <div style={{ maxHeight: 160, overflow: 'auto', display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  {dbMedia.map(m => {
+                    const sel = selectedMedia.has(m.path);
+                    const isVid = m.type?.includes('video');
+                    return (
+                      <button
+                        key={m.id}
+                        onClick={() => toggleMediaFile(m.path)}
+                        style={{
+                          padding: '4px 8px', fontSize: 10, fontFamily: 'var(--font-mono)',
+                          border: `1px solid ${sel ? '#8b5cf6' : 'var(--border-dim)'}`,
+                          borderRadius: 4, cursor: 'pointer',
+                          background: sel ? 'rgba(139,92,246,0.15)' : 'rgba(255,255,255,0.03)',
+                          color: sel ? '#8b5cf6' : 'var(--text-muted)',
+                          display: 'flex', alignItems: 'center', gap: 4,
+                        }}
+                      >
+                        {isVid ? <Video size={10} /> : <Image size={10} />}
+                        {m.filename || m.path.split('/').pop()}
+                        {m.product && <span style={{ fontSize: 8, opacity: 0.6 }}>({m.product})</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Auto mode info */}
+          {mediaMode === 'auto' && (
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', padding: '4px 0' }}>
+              AI will auto-generate images (Flux Pro) and videos (Kling 3.0) matching the post content.
+            </div>
+          )}
+        </div>
+
+        {/* AI Auto Actions */}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button
+            onClick={() => {
+              const product = selectedProduct ? PRODUCTS.find(p => p.id === selectedProduct)?.label ?? selectedProduct : 'all products';
+              const platforms = selectedPlatforms.size > 0 ? Array.from(selectedPlatforms).join(', ') : 'all platforms';
+              const media = getMediaInstruction();
+              sendAgentCommand(`Generate a compelling social media post for ${product}. Steps: 1) web_search current trends in the niche 2) Write copy using product brand voice — strong hook, hashtags, CTA 3) Include product link/landing page URL in the post 4) Publish text + media to: ${platforms} using social_post tool 5) Store in content_library + media_assets database. ${media}`);
+            }}
+            disabled={posting}
+            style={{ ...S.btnPrimary, opacity: posting ? 0.6 : 1 }}
+          >
+            <Zap size={14} />
+            AI Post
+          </button>
+          <button
+            onClick={() => {
+              const product = selectedProduct ? PRODUCTS.find(p => p.id === selectedProduct)?.label ?? selectedProduct : 'all products';
+              const platforms = selectedPlatforms.size > 0 ? Array.from(selectedPlatforms).join(', ') : 'all platforms';
+              const media = getMediaInstruction();
+              sendAgentCommand(`Create a short 5-second marketing video for ${product}. Steps: 1) web_search trending video formats and hooks 2) Write script: hook (3s) + value + CTA 3) Generate thumbnail image 4) Write engaging copy with hashtags, CTA, and product link 5) Publish video + text to: ${platforms} using social_post tool 6) Store in content_library + media_assets database. ${media}`);
+            }}
+            disabled={posting}
+            style={S.btnSecondary}
+          >
+            <Video size={14} />
+            AI Post + Video
+          </button>
+          <button
+            onClick={() => {
+              const product = selectedProduct ? PRODUCTS.find(p => p.id === selectedProduct)?.label ?? selectedProduct : 'all products';
+              const platforms = selectedPlatforms.size > 0 ? Array.from(selectedPlatforms).join(', ') : 'Twitter, Instagram, TikTok, LinkedIn';
+              const media = getMediaInstruction();
+              sendAgentCommand(`Run full social autopilot for ${product}. FULL AUTO — no manual input. Steps: 1) web_search trending content + viral formats in product niche 2) Check media_assets and content_library for existing unused assets — reuse if relevant 3) Generate content batch: 5 posts, each with unique angle (educational, entertaining, social proof, behind-scenes, promotional) 4) For EACH post: attach media — alternate between image and video posts, NEVER post without media 5) Include product links/landing pages in every post 6) Publish all to: ${platforms} using social_post, respecting optimal posting times from product config 7) Store everything in content_library + media_assets database 8) Report: what was posted, where, with links. ${media}`);
+            }}
+            disabled={posting}
+            style={{
+              ...S.btnSecondary,
+              borderColor: '#f472b6',
+              color: '#f472b6',
+              background: 'rgba(244,114,182,0.08)',
+            }}
+          >
+            <Rocket size={14} />
+            Full Autopilot (5 posts)
+          </button>
+        </div>
+
+        {/* Schedule section */}
+        <div style={{ marginTop: 14, borderTop: '1px solid var(--border-primary)', paddingTop: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <Calendar size={12} style={{ color: 'var(--text-muted)' }} />
+            <span style={S.muted}>Schedule for later</span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input
+              type="datetime-local"
+              value={scheduleDate}
+              onChange={e => setScheduleDate(e.target.value)}
+              style={{ ...S.input, width: 220, fontSize: 11 }}
+            />
+            <button
+              onClick={() => {
+                if (!scheduleDate || selectedPlatforms.size === 0) {
+                  setPostStatus({ text: 'Select platform(s) and pick a date', color: '#ef4444' });
+                  return;
+                }
+                const product = selectedProduct ? PRODUCTS.find(p => p.id === selectedProduct)?.label ?? selectedProduct : 'all products';
+                const platforms = Array.from(selectedPlatforms).join(', ');
+                const schedAt = new Date(scheduleDate).toISOString();
+                const media = getMediaInstruction();
+                sendAgentCommand(`Generate a compelling post for ${product}. Steps: 1) web_search trends 2) Write copy with hashtags, hook, CTA, product link 3) SCHEDULE (not post now) text + media to: ${platforms} at ${schedAt} using social_schedule tool 4) Store in content_library + media_assets. ${media}`);
+                setScheduleDate('');
+              }}
+              disabled={!scheduleDate}
+              style={{
+                ...S.btnSecondary,
+                borderColor: scheduleDate ? '#10b981' : undefined,
+                color: scheduleDate ? '#10b981' : undefined,
+                opacity: scheduleDate ? 1 : 0.5,
+              }}
+            >
+              <Clock size={12} />
+              AI Generate & Schedule
+            </button>
+          </div>
+        </div>
+
+        {/* Optional manual override (collapsed) */}
+        <div style={{ marginTop: 14, borderTop: '1px solid var(--border-primary)', paddingTop: 12 }}>
+          <details>
+            <summary style={{ ...S.muted, cursor: 'pointer', fontSize: 10, fontFamily: 'var(--font-display)', letterSpacing: 0.5 }}>
+              MANUAL POST (override)
+            </summary>
+            <div style={{ marginTop: 10 }}>
+              <textarea
+                value={postText}
+                onChange={e => setPostText(e.target.value)}
+                placeholder="Write your own post text..."
+                rows={3}
+                style={{ ...S.input, resize: 'vertical', minHeight: 60, marginBottom: 10 }}
+              />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  onClick={handlePost}
+                  disabled={posting || !postText.trim() || selectedPlatforms.size === 0}
+                  style={{ ...S.btnSecondary, opacity: posting || !postText.trim() ? 0.5 : 1 }}
+                >
+                  <Send size={12} />
+                  {posting ? 'Posting...' : 'Post Now'}
+                </button>
+                <button
+                  onClick={handleSchedule}
+                  disabled={posting || !postText.trim() || selectedPlatforms.size === 0 || !scheduleDate}
+                  style={{ ...S.btnSecondary, opacity: posting || !postText.trim() || !scheduleDate ? 0.5 : 1 }}
+                >
+                  <Calendar size={12} />
+                  Schedule
+                </button>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        {/* Status message */}
+        {postStatus && (
+          <div style={{ marginTop: 10, fontSize: 12, color: postStatus.color, fontFamily: 'var(--font-ui)' }}>
+            {postStatus.text}
+          </div>
+        )}
+      </div>
+
+      {/* ── C) Scheduled Queue ── */}
+      <div style={S.card}>
+        <div style={{ ...S.row, justifyContent: 'space-between', marginBottom: 12 }}>
+          <div style={S.sectionTitle}>Scheduled Queue</div>
+          <button onClick={fetchScheduled} style={{ ...S.btnSecondary, padding: '4px 10px', fontSize: 11 }}>
+            <RefreshCw size={12} style={scheduledLoading ? { animation: 'spin 1s linear infinite' } : undefined} />
+            Refresh
+          </button>
+        </div>
+
+        {scheduledLoading && scheduled.length === 0 ? (
+          <div style={S.muted}>Loading scheduled posts...</div>
+        ) : scheduled.length === 0 ? (
+          <div style={S.emptyState}>
+            <Calendar size={32} style={{ color: 'var(--text-muted)', opacity: 0.4 }} />
+            <span>No scheduled posts</span>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {scheduled.map(post => {
+              const platform = SOCIAL_PLATFORMS.find(p => p.id === post.platform);
+              const pColor = platform?.color ?? '#6b7280';
+              return (
+                <div
+                  key={post.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    padding: '10px 12px',
+                    background: 'rgba(255,255,255,0.02)',
+                    border: '1px solid var(--border-primary)',
+                    borderRadius: 8,
+                  }}
+                >
+                  <span style={S.badge(pColor)}>
+                    {platform?.label ?? post.platform}
+                  </span>
+                  <span style={{ flex: 1, fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {post.text.length > 80 ? post.text.slice(0, 80) + '...' : post.text}
+                  </span>
+                  <span style={{ ...S.muted, display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                    <ClockIcon size={11} />
+                    {new Date(post.scheduled_at).toLocaleString()}
+                  </span>
+                  <button
+                    onClick={() => cancelScheduled(post.id)}
+                    style={{
+                      ...S.btnSecondary,
+                      padding: '4px 8px',
+                      fontSize: 11,
+                      color: '#ef4444',
+                      borderColor: '#ef444440',
+                    }}
+                    title="Cancel scheduled post"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ── D) Agent Activity Feed ── */}
+      <div style={S.card}>
+        <div style={{ ...S.sectionTitle, marginBottom: 8 }}>Agent Activity</div>
+        {lastCommand ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Activity size={14} style={{ color: '#f472b6', flexShrink: 0 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-white)', marginBottom: 2 }}>
+                {lastCommand.cmd.length > 100 ? lastCommand.cmd.slice(0, 100) + '...' : lastCommand.cmd}
+              </div>
+              <div style={S.muted}>
+                {lastCommand.status} &middot; {lastCommand.time}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div style={S.muted}>No recent agent activity. Use Quick Actions above to send commands.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Database Tab ────────────────────────────────────────
 
 function DatabaseTab() {
@@ -1346,7 +2467,7 @@ function DatabaseTab() {
         const t = await gateway.request<TableInfo[]>('marketing.db.tables', {});
         setTables(t);
         if (t.length > 0) setSelectedTable(t[0].name);
-      } catch { /* */ }
+      } catch (err) { console.error('[MarketingHub]', err); }
     })();
   }, []);
 
@@ -1358,7 +2479,7 @@ function DatabaseTab() {
         table, limit: PAGE_SIZE, offset,
       });
       setQueryResult(res);
-    } catch { /* */ }
+    } catch (err) { console.error('[MarketingHub]', err); }
     setLoading(false);
   }, []);
 
@@ -1506,7 +2627,8 @@ const API_KEY_GROUPS = [
     keys: [
       { id: 'FAL_API_KEY', label: 'fal.ai (Flux Pro)', desc: 'Image generation' },
       { id: 'OPENAI_API_KEY', label: 'OpenAI (DALL-E 3)', desc: 'Image generation' },
-      { id: 'KLING_API_KEY', label: 'Kling 3.0', desc: 'Video generation' },
+      { id: 'KLING_ACCESS_KEY', label: 'Kling 3.0 — Access Key', desc: 'Video generation' },
+      { id: 'KLING_SECRET_KEY', label: 'Kling 3.0 — Secret Key', desc: '' },
       { id: 'RUNWAY_API_KEY', label: 'Runway Gen-4', desc: 'Premium video' },
       { id: 'ELEVENLABS_API_KEY', label: 'ElevenLabs', desc: 'Voice & audio' },
       { id: 'HEYGEN_API_KEY', label: 'HeyGen', desc: 'Avatar videos' },
@@ -1574,7 +2696,7 @@ function ApiKeysTab() {
       try {
         const res = await gateway.request<Record<string, string>>('marketing.apikeys.get', {});
         setKeys(res ?? {});
-      } catch { /* */ }
+      } catch (err) { console.error('[MarketingHub]', err); }
       setLoading(false);
     })();
   }, []);

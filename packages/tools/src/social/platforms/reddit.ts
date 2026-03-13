@@ -161,6 +161,40 @@ export class RedditClient {
     }
   }
 
+  /** Vote (upvote/downvote/unvote) on a post or comment */
+  async vote(thingId: string, direction: 1 | 0 | -1 = 1): Promise<ToolResult> {
+    const token = await this.getAccessToken();
+    if (!token) return createErrorResult('Reddit authentication failed');
+
+    try {
+      const fullId = thingId.startsWith('t') ? thingId : `t3_${thingId}`;
+      const body = new URLSearchParams({
+        id: fullId,
+        dir: String(direction),
+      });
+
+      const response = await fetch(`${REDDIT_API_URL}/api/vote`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'JarvisMarketing/4.0',
+        },
+        body: body.toString(),
+      });
+
+      if (!response.ok) {
+        const err = await response.text();
+        return createErrorResult(`Reddit vote failed (${response.status}): ${err}`);
+      }
+
+      const label = direction === 1 ? 'Upvoted' : direction === -1 ? 'Downvoted' : 'Removed vote on';
+      return createToolResult(`${label} ${fullId}`, { voted: true, thingId: fullId, direction });
+    } catch (err) {
+      return createErrorResult(`Reddit vote failed: ${(err as Error).message}`);
+    }
+  }
+
   /** Get subreddit info and rules */
   async getSubredditInfo(subreddit: string): Promise<ToolResult> {
     const token = await this.getAccessToken();

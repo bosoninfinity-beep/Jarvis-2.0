@@ -91,7 +91,7 @@ export class SocialSchedulerTool implements AgentTool {
       properties: {
         action: {
           type: 'string',
-          enum: ['schedule', 'list', 'cancel', 'reschedule'],
+          enum: ['schedule', 'list', 'cancel', 'reschedule', 'batch_schedule', 'get_stats'],
           description: 'Scheduler action',
         },
         platform: { type: 'string', description: 'Target platform' },
@@ -100,6 +100,23 @@ export class SocialSchedulerTool implements AgentTool {
         media_url: { type: 'string', description: 'Media URL' },
         scheduled_at: { type: 'string', description: 'ISO date string for when to publish (e.g. "2025-06-15T10:00:00Z")' },
         post_id: { type: 'string', description: 'Post ID (for cancel/reschedule)' },
+        posts: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              platform: { type: 'string' },
+              text: { type: 'string' },
+              post_type: { type: 'string' },
+              media_url: { type: 'string' },
+              link: { type: 'string' },
+              title: { type: 'string' },
+            },
+            required: ['platform', 'text'],
+          },
+          description: 'Array of posts for batch_schedule',
+        },
+        product: { type: 'string', description: 'Product name (OKIDOOKI/NowTrust/MakeItFun) for optimal timing' },
       },
       required: ['action'],
     },
@@ -178,6 +195,102 @@ export class SocialSchedulerTool implements AgentTool {
         return createToolResult(`Post ${postId} rescheduled to ${newTime}`);
       }
 
+      case 'batch_schedule': {
+        const posts = params['posts'] as Array<{platform: string, text: string, post_type?: string, media_url?: string, link?: string, title?: string}>;
+        const product = (params['product'] as string) || 'OKIDOOKI';
+        if (!posts || !Array.isArray(posts) || posts.length === 0) {
+          return createErrorResult('batch_schedule requires: posts (non-empty array)');
+        }
+
+        // Group posts by platform
+        const byPlatform = new Map<string, typeof posts>();
+        for (const post of posts) {
+          const existing = byPlatform.get(post.platform) || [];
+          existing.push(post);
+          byPlatform.set(post.platform, existing);
+        }
+
+        // Optimal posting hours per product/platform (from Marketing Hub v4)
+        const OPTIMAL_HOURS: Record<string, Record<string, number[]>> = {
+          OKIDOOKI: {
+            tiktok: [19, 20, 21, 22, 23],    // Thu-Sat 7PM-11PM
+            instagram: [18, 19, 20, 21],       // Wed-Sat 6PM-9PM
+            twitter: [20, 21, 22, 23, 0],     // Thu-Sat 8PM-12AM
+            facebook: [18, 19, 20],            // evenings
+            linkedin: [12, 13],                // lunch
+          },
+          NowTrust: {
+            linkedin: [7, 8, 9, 12, 13],      // Tue-Thu 7-9AM, 12-1PM
+            twitter: [8, 9, 10, 12, 13, 14],  // Mon-Fri 8-10AM, 12-2PM
+            youtube: [10],                      // Tue/Thu 10AM
+            facebook: [10, 14, 16],            // business hours
+          },
+          MakeItFun: {
+            tiktok: [10, 11, 12, 19, 20, 21], // Mon-Fri 10AM-12PM, 7PM-9PM
+            instagram: [11, 12, 13, 19, 20, 21], // Tue-Fri 11AM-1PM, 7PM-9PM
+            pinterest: [14, 15, 16, 20, 21, 22, 23], // daily 2PM-4PM, Sat-Sun 8PM-11PM
+            twitter: [10, 12, 14, 16, 18],    // spread throughout day
+          },
+        };
+
+        const scheduled: string[] = [];
+        const now = new Date();
+        let dayOffset = 0;
+
+        for (const [platform, platformPosts] of byPlatform) {
+          const hours = OPTIMAL_HOURS[product]?.[platform] || OPTIMAL_HOURS['OKIDOOKI']?.[platform] || [10, 14, 18];
+          let hourIndex = 0;
+
+          for (const post of platformPosts) {
+            // Calculate next available slot
+            const scheduledDate = new Date(now);
+            scheduledDate.setDate(scheduledDate.getDate() + dayOffset);
+            scheduledDate.setHours(hours[hourIndex % hours.length]!, 0, 0, 0);
+
+            // If the time is in the past, move to next day
+            if (scheduledDate.getTime() <= Date.now()) {
+              scheduledDate.setDate(scheduledDate.getDate() + 1);
+            }
+
+            const id = `sched-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+            const postType = post.post_type || 'post';
+            const scheduledAtMs = scheduledDate.getTime();
+            const createdAt = Date.now();
+
+            const escapeSql = (s: string | null) => s ? `'${s.replace(/'/g, "''")}'` : 'NULL';
+
+            runSql(dbPath, `INSERT INTO scheduled_posts (id, platform, action, text, media_url, link, title, scheduled_at, status, created_at) VALUES (${escapeSql(id)}, ${escapeSql(platform)}, ${escapeSql(postType)}, ${escapeSql(post.text)}, ${escapeSql(post.media_url || null)}, ${escapeSql(post.link || null)}, ${escapeSql(post.title || null)}, ${scheduledAtMs}, 'scheduled', ${createdAt});`);
+
+            scheduled.push(`${platform} @ ${scheduledDate.toISOString()} — ${post.text.slice(0, 50)}...`);
+
+            hourIndex++;
+            // If we've used all hours for today, move to next day
+            if (hourIndex >= hours.length) {
+              hourIndex = 0;
+              dayOffset++;
+            }
+          }
+        }
+
+        return createToolResult(
+          `Batch scheduled ${scheduled.length} posts:\n${scheduled.map((s, i) => `${i + 1}. ${s}`).join('\n')}`,
+        );
+      }
+
+      case 'get_stats': {
+        const stats = parseRows<{ status: string; cnt: number }>(
+          runSql(dbPath, `SELECT status, COUNT(*) as cnt FROM scheduled_posts GROUP BY status;`, true),
+        );
+        const byStatus = Object.fromEntries(stats.map(r => [r.status, r.cnt]));
+        const nextRows = parseRows<{ scheduled_at: number }>(
+          runSql(dbPath, `SELECT scheduled_at FROM scheduled_posts WHERE status = 'scheduled' ORDER BY scheduled_at ASC LIMIT 1;`, true),
+        );
+        const nextDue = nextRows[0] ? new Date(nextRows[0].scheduled_at).toISOString() : 'none';
+        return createToolResult(
+          `Scheduler stats:\n  Scheduled: ${byStatus['scheduled'] ?? 0}\n  Published: ${byStatus['published'] ?? 0}\n  Failed: ${byStatus['failed'] ?? 0}\n  Cancelled: ${byStatus['cancelled'] ?? 0}\n  Next due: ${nextDue}`,
+        );
+      }
+
       default:
         return createErrorResult(`Unknown action: ${action}`);
     }
@@ -241,7 +354,7 @@ export class ScheduledPostExecutor {
 
       if (rows.length === 0) return { published: 0, failed: 0 };
 
-      log.info({ count: rows.length }, 'Publishing due scheduled posts');
+      log.info(`Publishing ${rows.length} due scheduled posts`);
 
       for (const row of rows) {
         const success = await this.publishPost(row);
@@ -250,15 +363,15 @@ export class ScheduledPostExecutor {
         if (success) {
           runSql(this.dbPath, `UPDATE scheduled_posts SET status = 'published', published_at = ${Date.now()} WHERE id = ${escapeSql(row.id)};`);
           published++;
-          log.info({ postId: row.id, platform: row.platform }, 'Scheduled post published');
+          log.info(`Scheduled post published: ${row.id} (${row.platform})`);
         } else {
           runSql(this.dbPath, `UPDATE scheduled_posts SET status = 'failed' WHERE id = ${escapeSql(row.id)};`);
           failed++;
-          log.error({ postId: row.id, platform: row.platform }, 'Scheduled post failed');
+          log.error(`Scheduled post failed: ${row.id} (${row.platform})`);
         }
       }
     } catch (err) {
-      log.error({ error: (err as Error).message }, 'Executor tick failed');
+      log.error(`Executor tick failed: ${(err as Error).message}`);
     } finally {
       this.running = false;
     }
@@ -290,7 +403,7 @@ export class ScheduledPostExecutor {
 
         if (result.type === 'error') {
           if (attempt < MAX_PUBLISH_RETRIES) {
-            log.warn({ postId: row.id, attempt }, `Publish attempt failed, retrying: ${result.content}`);
+            log.warn(`Publish attempt ${attempt} failed for ${row.id}, retrying: ${result.content}`);
             await new Promise(r => setTimeout(r, 3000 * attempt));
             continue;
           }

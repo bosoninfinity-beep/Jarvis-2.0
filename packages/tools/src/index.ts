@@ -27,6 +27,7 @@ export { ImageGenTool } from './image-gen.js';
 // Social media
 export { SocialTool, SocialAnalyticsTool, type SocialToolConfig } from './social/social-tool.js';
 export { SocialSchedulerTool, ScheduledPostExecutor, type ScheduledPost } from './social/scheduler.js';
+export { SocialEngagementTool } from './social/engagement.js';
 // SocialContentGeneratorTool removed — agent writes content directly (it IS Claude with full context)
 export { TwitterClient, type TwitterConfig } from './social/platforms/twitter.js';
 export { InstagramClient, type InstagramConfig } from './social/platforms/instagram.js';

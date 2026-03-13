@@ -82,9 +82,9 @@ export function ApiKeysView() {
       // These are just display indicators, no actual keys exposed
       envKeys.push({
         id: 'env-anthropic',
-        name: 'ANTHROPIC_API_KEY',
+        name: 'Claude CLI (Max subscription)',
         provider: 'anthropic',
-        keyPreview: '(from environment)',
+        keyPreview: '(Claude CLI)',
         addedAt: Date.now(),
         status: 'active',
       });

@@ -25,7 +25,7 @@ export {
 // LLM
 export {
   ProviderRegistry, type ProviderRegistryConfig,
-  AnthropicProvider, OpenAIProvider, GoogleProvider, OllamaProvider, OpenRouterProvider,
+  ClaudeCliProvider, OpenAIProvider, GoogleProvider, OllamaProvider, OpenRouterProvider,
   type LLMProvider, type ChatRequest, type ChatResponse, type ChatChunk,
   type Message, type ContentBlock, type ToolDefinition, type TokenUsage, type ModelInfo,
   createUsageAccumulator, mergeUsage,
