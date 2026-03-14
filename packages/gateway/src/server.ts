@@ -181,7 +181,9 @@ export class GatewayServer {
     this.registerMethods();
   }
 
-  // ── VNC / SSH target resolver (used by HTTP routes + RPC methods) ──
+  // ── Target resolvers ──
+  // VNC uses Thunderbolt (high bandwidth), SSH uses LAN (stable IPs)
+
   private resolveVncTarget(target: string): { ip: string; username: string; label: string } | null {
     const tbEnabled = process.env['THUNDERBOLT_ENABLED'] === 'true';
     if (target === 'smith') {
@@ -198,6 +200,24 @@ export class GatewayServer {
         ip: tbEnabled
           ? (process.env['VNC_BETA_HOST_THUNDERBOLT'] ?? process.env['JOHNY_IP'] ?? '192.168.1.253')
           : (process.env['JOHNY_IP'] ?? '192.168.1.253'),
+        username: process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? 'kamilpadula',
+        label: 'Agent Johny (Marketing)',
+      };
+    }
+    return null;
+  }
+
+  private resolveSSHTarget(target: string): { ip: string; username: string; label: string } | null {
+    if (target === 'smith') {
+      return {
+        ip: process.env['SMITH_IP'] ?? '192.168.1.37',
+        username: process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? 'agent_smith',
+        label: 'Agent Smith (Dev)',
+      };
+    }
+    if (target === 'johny') {
+      return {
+        ip: process.env['JOHNY_IP'] ?? '192.168.1.253',
         username: process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? 'kamilpadula',
         label: 'Agent Johny (Marketing)',
       };
@@ -541,9 +561,9 @@ export class GatewayServer {
       });
     });
 
-    // ── VNC: clipboard via SSH pbcopy/pbpaste ───────────────────────────
+    // ── VNC: clipboard via SSH pbcopy/pbpaste (uses LAN IP for SSH) ────
     this.app.get('/api/vnc/clipboard', async (req, res) => {
-      const target = this.resolveVncTarget(String(req.query.target ?? ''));
+      const target = this.resolveSSHTarget(String(req.query.target ?? ''));
       if (!target) { res.status(400).json({ error: 'Invalid target (smith|johny)' }); return; }
 
       try {
@@ -562,7 +582,7 @@ export class GatewayServer {
     });
 
     this.app.post('/api/vnc/clipboard', express.text({ limit: '1mb' }), async (req, res) => {
-      const target = this.resolveVncTarget(String(req.query.target ?? ''));
+      const target = this.resolveSSHTarget(String(req.query.target ?? ''));
       if (!target) { res.status(400).json({ error: 'Invalid target (smith|johny)' }); return; }
 
       try {
@@ -591,7 +611,7 @@ export class GatewayServer {
 
     // ── VNC: file upload via SCP ────────────────────────────────────────
     this.app.post('/api/vnc/upload', express.raw({ limit: '100mb', type: 'application/octet-stream' }), async (req, res) => {
-      const target = this.resolveVncTarget(String(req.query.target ?? ''));
+      const target = this.resolveSSHTarget(String(req.query.target ?? ''));
       const filename = String(req.query.filename ?? 'upload');
       if (!target) { res.status(400).json({ error: 'Invalid target (smith|johny)' }); return; }
 
@@ -3016,7 +3036,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
       if (agentId === 'jarvis') {
         // Local — check directly
         try {
-          const raw = execSync('claude auth status 2>&1', { encoding: 'utf-8', timeout: 10000 }).trim();
+          const raw = execSync('export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude auth status 2>&1', { encoding: 'utf-8', timeout: 10000 }).trim();
           const status = JSON.parse(raw);
           return { agentId, ...status };
         } catch (err) {
@@ -3025,7 +3045,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
       }
       if (!slot) throw new Error(`Unknown agent: ${agentId}`);
 
-      const target = this.resolveVncTarget(slot);
+      const target = this.resolveSSHTarget(slot);
       if (!target) throw new Error(`Cannot resolve SSH target for ${agentId}`);
 
       try {
@@ -3052,7 +3072,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
             'export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude login --method claude-ai 2>&1 || true',
             { encoding: 'utf-8', timeout: 30000 },
           ).trim();
-          const statusRaw = execSync('claude auth status 2>&1', { encoding: 'utf-8', timeout: 10000 }).trim();
+          const statusRaw = execSync('export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude auth status 2>&1', { encoding: 'utf-8', timeout: 10000 }).trim();
           try {
             const status = JSON.parse(statusRaw);
             return { agentId, output: raw, ...status };
@@ -3065,7 +3085,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
       }
       if (!slot) throw new Error(`Unknown agent: ${agentId}`);
 
-      const target = this.resolveVncTarget(slot);
+      const target = this.resolveSSHTarget(slot);
       if (!target) throw new Error(`Cannot resolve SSH target for ${agentId}`);
 
       // Run claude login with API key method (non-interactive)
