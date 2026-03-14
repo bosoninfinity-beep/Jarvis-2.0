@@ -3048,9 +3048,15 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
       const target = this.resolveSSHTarget(slot);
       if (!target) throw new Error(`Cannot resolve SSH target for ${agentId}`);
 
+      // Get agent password for keychain unlock (claude.keychain-db may be locked)
+      const agentPass = slot === 'smith' ? (process.env['SMITH_PASS'] ?? '') : (process.env['JOHNY_PASS'] ?? '');
+      const keychainUnlock = agentPass
+        ? `security unlock-keychain -p '${agentPass}' ~/Library/Keychains/claude.keychain-db 2>/dev/null; security unlock-keychain -p '${agentPass}' ~/Library/Keychains/login.keychain-db 2>/dev/null; `
+        : '';
+
       try {
         const raw = execSync(
-          `ssh -i "${this.sshKeyPath}" -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${target.username}@${target.ip} 'export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude auth status 2>&1'`,
+          `ssh -i "${this.sshKeyPath}" -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${target.username}@${target.ip} '${keychainUnlock}export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude auth status 2>&1'`,
           { encoding: 'utf-8', timeout: 15000 },
         ).trim();
         const status = JSON.parse(raw);
@@ -3088,17 +3094,20 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
       const target = this.resolveSSHTarget(slot);
       if (!target) throw new Error(`Cannot resolve SSH target for ${agentId}`);
 
-      // Run claude login with API key method (non-interactive)
-      // This creates a login URL the user needs to visit
+      const agentPass = slot === 'smith' ? (process.env['SMITH_PASS'] ?? '') : (process.env['JOHNY_PASS'] ?? '');
+      const keychainUnlock = agentPass
+        ? `security unlock-keychain -p '${agentPass}' ~/Library/Keychains/claude.keychain-db 2>/dev/null; security unlock-keychain -p '${agentPass}' ~/Library/Keychains/login.keychain-db 2>/dev/null; `
+        : '';
+
       try {
         const raw = execSync(
-          `ssh -i "${this.sshKeyPath}" -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${target.username}@${target.ip} 'export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude login --method claude-ai 2>&1 || true'`,
+          `ssh -i "${this.sshKeyPath}" -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${target.username}@${target.ip} '${keychainUnlock}export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude login --method claude-ai 2>&1 || true'`,
           { encoding: 'utf-8', timeout: 30000 },
         ).trim();
 
         // Check if login succeeded
         const statusRaw = execSync(
-          `ssh -i "${this.sshKeyPath}" -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${target.username}@${target.ip} 'export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude auth status 2>&1'`,
+          `ssh -i "${this.sshKeyPath}" -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${target.username}@${target.ip} '${keychainUnlock}export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; claude auth status 2>&1'`,
           { encoding: 'utf-8', timeout: 15000 },
         ).trim();
 
