@@ -36,6 +36,9 @@ import { createObsidianPlugin } from './builtin/obsidian-plugin.js';
 import { createSocialSchedulerPlugin } from './builtin/social-scheduler-plugin.js';
 import { createMarketingEnginePlugin } from './builtin/marketing-engine-plugin.js';
 import { createWebsiteBuilderPlugin } from './builtin/website-builder-plugin.js';
+import { createDelamainGoalRegistryPlugin } from './builtin/delamain-goal-registry-plugin.js';
+import { createDelamainDecisionEnginePlugin } from './builtin/delamain-decision-engine-plugin.js';
+import { createDelamainNichePipelinePlugin } from './builtin/delamain-niche-pipeline-plugin.js';
 
 const log = createLogger('plugins:loader');
 
@@ -77,6 +80,9 @@ export async function loadPlugins(config: PluginLoaderConfig): Promise<LoadedPlu
       createSocialSchedulerPlugin(),
       createMarketingEnginePlugin(),
       createWebsiteBuilderPlugin(),
+      createDelamainGoalRegistryPlugin(),
+      createDelamainDecisionEnginePlugin(),
+      createDelamainNichePipelinePlugin(),
     ];
 
     for (const plugin of builtins) {

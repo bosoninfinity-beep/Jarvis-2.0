@@ -414,9 +414,9 @@ echo ""
 echo -e "  ${YELLOW}Thunderbolt Bridge Detection...${RESET}"
 
 TB_ENABLED=false
-TB_MASTER_IP="169.254.100.1"
-TB_ALPHA_IP="169.254.100.2"
-TB_BETA_IP="169.254.100.3"
+TB_MASTER_IP="10.0.1.1"
+TB_ALPHA_IP="10.0.1.2"
+TB_BETA_IP="10.0.1.3"
 TB_NATS_PORT=4223
 
 # Detect Thunderbolt Bridge interface
@@ -443,9 +443,9 @@ if [[ -n "$TB_IFACE" ]]; then
     # Assign static IP if not already set
     if [[ -z "$TB_CURRENT_IP" || "$TB_CURRENT_IP" != "$TB_MASTER_IP" ]]; then
       echo -e "  ${DIM}Przypisywanie IP ${TB_MASTER_IP} do Thunderbolt Bridge...${RESET}"
-      networksetup -setmanual "Thunderbolt Bridge" "$TB_MASTER_IP" "255.255.0.0" 2>/dev/null || {
+      networksetup -setmanual "Thunderbolt Bridge" "$TB_MASTER_IP" "255.255.255.0" 2>/dev/null || {
         warn "Nie udalo sie ustawic IP - moze wymagac sudo"
-        warn "Reczne: sudo networksetup -setmanual 'Thunderbolt Bridge' $TB_MASTER_IP 255.255.0.0"
+        warn "Reczne: sudo networksetup -setmanual 'Thunderbolt Bridge' $TB_MASTER_IP 255.255.255.0"
       }
     fi
 

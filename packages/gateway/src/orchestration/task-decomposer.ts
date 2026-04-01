@@ -142,26 +142,52 @@ export class TaskDecomposer {
     };
   }
 
-  /** Assign subtask to the best available agent */
-  assignAgent(subtask: SubTask, availableAgents: Array<{ id: AgentId; capabilities: string[]; status: string }>): AgentId | null {
-    // Prefer the designated agent if available
+  /** Assign subtask to the best available agent (load-aware) */
+  assignAgent(
+    subtask: SubTask,
+    availableAgents: Array<{ id: AgentId; capabilities: string[]; status: string }>,
+    agentLoads?: Map<string, { cpuLoad: number; memoryPercent: number; isOverloaded: boolean }>,
+  ): AgentId | null {
+    const isOverloaded = (id: string) => agentLoads?.get(id)?.isOverloaded ?? false;
+    const getLoadScore = (id: string) => {
+      const load = agentLoads?.get(id);
+      if (!load) return 50; // unknown = medium
+      return (load.cpuLoad + load.memoryPercent) / 2;
+    };
+
+    // Filter out offline and overloaded agents
+    const online = availableAgents.filter((a) => a.status !== 'offline' && !isOverloaded(a.id));
+
+    // Prefer the designated agent if available and not overloaded
     if (subtask.preferredAgent) {
-      const preferred = availableAgents.find((a) => a.id === subtask.preferredAgent && a.status !== 'offline');
+      const preferred = online.find((a) => a.id === subtask.preferredAgent);
       if (preferred) return preferred.id;
+      // Preferred is overloaded — fall through to capability match
     }
 
-    // Match by capabilities
-    for (const agent of availableAgents) {
-      if (agent.status === 'offline') continue;
-      const hasCapability = subtask.requiredCapabilities.some((cap) =>
-        agent.capabilities.includes(cap),
-      );
-      if (hasCapability) return agent.id;
+    // Match by capabilities, pick least loaded
+    const capable = online.filter((a) =>
+      subtask.requiredCapabilities.some((cap) => a.capabilities.includes(cap)),
+    );
+    if (capable.length > 0) {
+      capable.sort((a, b) => getLoadScore(a.id) - getLoadScore(b.id));
+      return capable[0]!.id;
     }
 
-    // Fallback: assign to any idle agent
-    const idle = availableAgents.find((a) => a.status === 'idle');
-    return idle?.id ?? null;
+    // Fallback: least loaded idle agent
+    const idle = online.filter((a) => a.status === 'idle');
+    if (idle.length > 0) {
+      idle.sort((a, b) => getLoadScore(a.id) - getLoadScore(b.id));
+      return idle[0]!.id;
+    }
+
+    // Last resort: any online agent (even busy), least loaded
+    if (online.length > 0) {
+      online.sort((a, b) => getLoadScore(a.id) - getLoadScore(b.id));
+      return online[0]!.id;
+    }
+
+    return null;
   }
 
   private matchesPattern(text: string, patterns: string[]): boolean {

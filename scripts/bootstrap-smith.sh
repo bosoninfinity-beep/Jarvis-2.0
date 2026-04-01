@@ -19,7 +19,7 @@ set -euo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'
 YELLOW='\033[1;33m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
 
-MASTER_USB_IP="169.254.157.233"
+MASTER_USB_IP="10.0.1.1"
 MASTER_WIFI_IP="192.168.1.33"
 MASTER_HTTP_PORT="9876"
 JARVIS_DIR="$HOME/Documents/Jarvis-2.0/jarvis"
@@ -198,12 +198,12 @@ JARVIS_AUTH_TOKEN=jarvis-dev-token-2024
 # NAS Mount (stworz katalog lokalnie na testy)
 JARVIS_NAS_MOUNT=$JARVIS_DIR/../jarvis-nas
 
-# USB-C Direct Link (en12 - USB NCM)
-# Master: ${MASTER_USB_IP} <-> Alpha: ${MY_USB_IP:-169.254.237.92}
+# Thunderbolt 5 Direct Link (120 Gbps)
+# Master: 10.0.1.1 <-> Smith: 10.0.1.2
 THUNDERBOLT_ENABLED=true
-NATS_URL_THUNDERBOLT=nats://${MASTER_USB_IP}:4222
-MASTER_IP_THUNDERBOLT=${MASTER_USB_IP}
-ALPHA_IP_THUNDERBOLT=${MY_USB_IP:-169.254.237.92}
+NATS_URL_THUNDERBOLT=nats://10.0.1.1:4223
+MASTER_IP_THUNDERBOLT=10.0.1.1
+ALPHA_IP_THUNDERBOLT=10.0.1.2
 
 # LLM Providers (klucze z Master - uzywaj te same)
 ANTHROPIC_API_KEY=

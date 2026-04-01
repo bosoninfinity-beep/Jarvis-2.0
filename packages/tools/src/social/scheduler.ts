@@ -365,7 +365,8 @@ export class ScheduledPostExecutor {
           published++;
           log.info(`Scheduled post published: ${row.id} (${row.platform})`);
         } else {
-          runSql(this.dbPath, `UPDATE scheduled_posts SET status = 'failed' WHERE id = ${escapeSql(row.id)};`);
+          const errMsg = `Publishing to ${row.platform} failed after ${MAX_PUBLISH_RETRIES} attempts`;
+          runSql(this.dbPath, `UPDATE scheduled_posts SET status = 'failed', error = ${escapeSql(errMsg)} WHERE id = ${escapeSql(row.id)};`);
           failed++;
           log.error(`Scheduled post failed: ${row.id} (${row.platform})`);
         }

@@ -57,44 +57,44 @@ const defaultModel = process.env['DEFAULT_MODEL'] ?? 'claude-opus-4-6';
 // Claude CLI only — Max subscription, no API keys
 
 // SSH host config for remote machine control
-const sshAlphaHost = process.env['SSH_ALPHA_HOST'] ?? process.env['VNC_ALPHA_HOST'];
-const sshAlphaUser = process.env['SSH_ALPHA_USER'] ?? process.env['VNC_ALPHA_USERNAME'];
-const sshAlphaPass = process.env['SSH_ALPHA_PASSWORD'] ?? process.env['VNC_ALPHA_PASSWORD'];
-const sshAlphaKey = process.env['SSH_ALPHA_KEY'];
-const sshBetaHost = process.env['SSH_BETA_HOST'] ?? process.env['BETA_IP'];
-const sshBetaUser = process.env['SSH_BETA_USER'] ?? process.env['VNC_BETA_USERNAME'] ?? process.env['BETA_USER'];
-const sshBetaPass = process.env['SSH_BETA_PASSWORD'] ?? process.env['VNC_BETA_PASSWORD'];
-const sshBetaKey = process.env['SSH_BETA_KEY'];
+const sshSmithHost = process.env['SSH_SMITH_HOST'] ?? process.env['SMITH_IP'];
+const sshSmithUser = process.env['SSH_SMITH_USER'] ?? process.env['SMITH_USER'];
+const sshSmithPass = process.env['SSH_SMITH_PASSWORD'] ?? process.env['SMITH_PASS'];
+const sshSmithKey = process.env['SSH_SMITH_KEY'];
+const sshJohnyHost = process.env['SSH_JOHNY_HOST'] ?? process.env['JOHNY_IP'];
+const sshJohnyUser = process.env['SSH_JOHNY_USER'] ?? process.env['JOHNY_USER'];
+const sshJohnyPass = process.env['SSH_JOHNY_PASSWORD'] ?? process.env['JOHNY_PASS'];
+const sshJohnyKey = process.env['SSH_JOHNY_KEY'];
 
 // Build SSH hosts map
 const sshHosts: Record<string, { host: string; username: string; password?: string; privateKeyPath?: string }> = {};
-if (sshAlphaHost && sshAlphaUser) {
-  sshHosts['agent-smith'] = { host: sshAlphaHost, username: sshAlphaUser, password: sshAlphaPass, privateKeyPath: sshAlphaKey };
+if (sshSmithHost && sshSmithUser) {
+  sshHosts['agent-smith'] = { host: sshSmithHost, username: sshSmithUser, password: sshSmithPass, privateKeyPath: sshSmithKey };
 }
-if (sshBetaHost && sshBetaUser) {
-  sshHosts['agent-johny'] = { host: sshBetaHost, username: sshBetaUser, password: sshBetaPass, privateKeyPath: sshBetaKey };
+if (sshJohnyHost && sshJohnyUser) {
+  sshHosts['agent-johny'] = { host: sshJohnyHost, username: sshJohnyUser, password: sshJohnyPass, privateKeyPath: sshJohnyKey };
 }
 
 // VNC host config for computer use (screenshots + mouse/keyboard via VNC protocol)
-const vncAlphaHost = process.env['VNC_ALPHA_HOST'];
-const vncAlphaPass = process.env['VNC_ALPHA_PASSWORD'];
-const vncBetaHost = process.env['BETA_IP'] ?? process.env['VNC_BETA_HOST'];
-const vncBetaPass = process.env['VNC_BETA_PASSWORD'];
+const vncSmithHost = process.env['VNC_SMITH_HOST'] ?? process.env['SMITH_IP'];
+const vncSmithPass = process.env['VNC_SMITH_PASSWORD'] ?? process.env['SMITH_PASS'];
+const vncJohnyHost = process.env['VNC_JOHNY_HOST'] ?? process.env['JOHNY_IP'];
+const vncJohnyPass = process.env['VNC_JOHNY_PASSWORD'] ?? process.env['JOHNY_PASS'];
 
 const vncHosts: Record<string, { host: string; vncPort: number; vncPassword: string; ssh?: { host: string; username: string; password?: string } }> = {};
-if (vncAlphaHost && vncAlphaPass) {
+if (vncSmithHost && vncSmithPass) {
   vncHosts['agent-smith'] = {
-    host: vncAlphaHost,
+    host: vncSmithHost,
     vncPort: 5900,
-    vncPassword: vncAlphaPass,
+    vncPassword: vncSmithPass,
     ssh: sshHosts['agent-smith'],
   };
 }
-if (vncBetaHost && vncBetaPass) {
+if (vncJohnyHost && vncJohnyPass) {
   vncHosts['agent-johny'] = {
-    host: vncBetaHost,
+    host: vncJohnyHost,
     vncPort: 5900,
-    vncPassword: vncBetaPass,
+    vncPassword: vncJohnyPass,
     ssh: sshHosts['agent-johny'],
   };
 }

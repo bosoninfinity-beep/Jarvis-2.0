@@ -41,9 +41,9 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
 
   // Thunderbolt form states
   const [tbEnabled, setTbEnabled] = useState(false);
-  const [tbMasterIp, setTbMasterIp] = useState('169.254.100.1');
-  const [tbSmithIp, setTbSmithIp] = useState('169.254.100.2');
-  const [tbJohnyIp, setTbJohnyIp] = useState('169.254.100.3');
+  const [tbMasterIp, setTbMasterIp] = useState('10.0.1.1');
+  const [tbSmithIp, setTbSmithIp] = useState('10.0.1.2');
+  const [tbJohnyIp, setTbJohnyIp] = useState('10.0.1.3');
 
   const fetchConfig = useCallback(async () => {
     try {
@@ -60,9 +60,9 @@ export function SettingsPanel({ visible, onClose }: SettingsPanelProps) {
         // Thunderbolt
         if (data.thunderbolt) {
           setTbEnabled(data.thunderbolt.enabled);
-          setTbMasterIp(data.thunderbolt.master_ip || '169.254.100.1');
-          setTbSmithIp(data.thunderbolt.smith_ip || '169.254.100.2');
-          setTbJohnyIp(data.thunderbolt.johny_ip || '169.254.100.3');
+          setTbMasterIp(data.thunderbolt.master_ip || '10.0.1.1');
+          setTbSmithIp(data.thunderbolt.smith_ip || '10.0.1.2');
+          setTbJohnyIp(data.thunderbolt.johny_ip || '10.0.1.3');
         }
       }
     } catch {

@@ -380,14 +380,14 @@ echo -e "  ${YELLOW}Thunderbolt Bridge Detection...${RESET}"
 
 TB_ENABLED=false
 TB_AGENT_IP=""
-TB_MASTER_IP="169.254.157.233"
+TB_MASTER_IP="10.0.1.1"
 TB_NATS_PORT=4223
 
 # Determine expected TB IP based on role
 if [[ "$AGENT_ID" == "agent-smith" ]]; then
-  TB_AGENT_IP="169.254.61.154"
+  TB_AGENT_IP="10.0.1.2"
 else
-  TB_AGENT_IP="169.254.97.62"
+  TB_AGENT_IP="10.0.1.3"
 fi
 
 # Detect Thunderbolt Bridge interface
@@ -409,7 +409,7 @@ if [[ -n "$TB_IFACE" ]]; then
     # Assign our static IP if needed
     if [[ -z "$TB_CURRENT_IP" || "$TB_CURRENT_IP" != "$TB_AGENT_IP" ]]; then
       echo -e "  ${DIM}Przypisywanie IP ${TB_AGENT_IP} do Thunderbolt Bridge...${RESET}"
-      networksetup -setmanual "Thunderbolt Bridge" "$TB_AGENT_IP" "255.255.0.0" 2>/dev/null || {
+      networksetup -setmanual "Thunderbolt Bridge" "$TB_AGENT_IP" "255.255.255.0" 2>/dev/null || {
         warn "Nie udalo sie ustawic TB IP - moze wymagac sudo"
       }
     fi

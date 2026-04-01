@@ -3,6 +3,15 @@ import WebKit
 
 // ─── Service Manager ──────────────────────────────────────────
 
+/// Config snapshot for restarting a remote agent without re-reading jarvis.env
+private struct RemoteAgentConfig {
+    let name: String        // "smith" or "johny"
+    let host: String
+    let user: String
+    let password: String
+    let agentId: String     // "agent-smith" or "agent-johny"
+}
+
 class ServiceManager {
     private var natsProcess: Process?
     private var redisProcess: Process?
@@ -10,6 +19,13 @@ class ServiceManager {
     private var orchestratorProcess: Process?
     private var agentProcesses: [String: Process] = [:]   // "agent-smith", "agent-johny"
     private var remoteProcesses: [String: Process] = [:]  // "smith-vnc", "johny-vnc"
+
+    // ─── Watchdog ────────────────────────────────────────────
+    private var watchdogTimer: DispatchSourceTimer?
+    private var remoteAgentConfigs: [String: RemoteAgentConfig] = [:]  // keyed by name ("smith", "johny")
+    private var restartTimestamps: [String: [Date]] = [:]  // process key → last restart times
+    private let maxRestartsPerWindow = 5
+    private let restartWindowSeconds: TimeInterval = 600   // 10 minutes
 
     private let bundleBin: String
     private let bundleRes: String
@@ -315,6 +331,21 @@ class ServiceManager {
         let johnyUser = envValue("JOHNY_USER", from: envContent)
         let johnyPass = envValue("JOHNY_PASS", from: envContent)
 
+        // Save configs for watchdog before deploy (deploy blocks)
+        if !smithHost.isEmpty && !smithUser.isEmpty {
+            remoteAgentConfigs["smith"] = RemoteAgentConfig(
+                name: "smith", host: smithHost, user: smithUser,
+                password: smithPass, agentId: "agent-smith")
+        }
+        if !johnyHost.isEmpty && !johnyUser.isEmpty {
+            remoteAgentConfigs["johny"] = RemoteAgentConfig(
+                name: "johny", host: johnyHost, user: johnyUser,
+                password: johnyPass, agentId: "agent-johny")
+        }
+
+        // Start watchdog BEFORE deploy (deploy blocks for minutes on WiFi rsync)
+        startWatchdog()
+
         startRemoteAgent(name: "smith", host: smithHost, user: smithUser, password: smithPass, agentId: "agent-smith")
         startRemoteAgent(name: "johny", host: johnyHost, user: johnyUser, password: johnyPass, agentId: "agent-johny")
 
@@ -359,6 +390,126 @@ class ServiceManager {
         // Terminate orchestrator
         terminateProcess(orchestratorProcess, name: "Orchestrator")
         orchestratorProcess = nil
+
+        stopWatchdog()
+        remoteAgentConfigs.removeAll()
+        restartTimestamps.removeAll()
+    }
+
+    // ─── Process Watchdog ────────────────────────────────────────
+    //
+    // Checks every 30s if orchestrator, agent-runtime, or VNC SSH sessions
+    // have died. If so, restarts them with backoff (max 5 restarts / 10 min).
+
+    func startWatchdog() {
+        guard watchdogTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 30, repeating: 30.0)
+        timer.setEventHandler { [weak self] in self?.watchdogCheck() }
+        timer.resume()
+        watchdogTimer = timer
+        NSLog("Watchdog started (30s interval, max \(maxRestartsPerWindow) restarts per \(Int(restartWindowSeconds))s)")
+    }
+
+    func stopWatchdog() {
+        watchdogTimer?.cancel()
+        watchdogTimer = nil
+    }
+
+    private func watchdogCheck() {
+        // 1. Orchestrator
+        if let p = orchestratorProcess, !p.isRunning {
+            NSLog("Watchdog: orchestrator died (exit \(p.terminationStatus))")
+            if shouldRestart(key: "orchestrator") {
+                let envContent = (try? String(contentsOfFile: "\(dataDir)/jarvis.env", encoding: .utf8)) ?? ""
+                startOrchestrator(envContent: envContent)
+            }
+        }
+
+        // 2. Remote agents (agent-runtime + VNC proxy)
+        for (name, config) in remoteAgentConfigs {
+            let agentKey = "\(name)-agent"
+            let vncKey = "\(name)-vnc"
+
+            if let p = remoteProcesses[agentKey], !p.isRunning {
+                NSLog("Watchdog: \(agentKey) died (exit \(p.terminationStatus))")
+                if shouldRestart(key: agentKey) {
+                    restartRemoteAgentRuntime(config: config)
+                }
+            }
+
+            if let p = remoteProcesses[vncKey], !p.isRunning {
+                NSLog("Watchdog: \(vncKey) died (exit \(p.terminationStatus))")
+                if shouldRestart(key: vncKey) {
+                    restartRemoteVncProxy(config: config)
+                }
+            }
+        }
+    }
+
+    /// Check backoff: allow max N restarts per time window
+    private func shouldRestart(key: String) -> Bool {
+        let now = Date()
+        var timestamps = restartTimestamps[key] ?? []
+        // Prune old entries outside the window
+        timestamps = timestamps.filter { now.timeIntervalSince($0) < restartWindowSeconds }
+
+        if timestamps.count >= maxRestartsPerWindow {
+            NSLog("Watchdog: \(key) hit restart limit (\(maxRestartsPerWindow)/\(Int(restartWindowSeconds))s) — waiting for cooldown")
+            restartTimestamps[key] = timestamps
+            return false
+        }
+
+        timestamps.append(now)
+        restartTimestamps[key] = timestamps
+        NSLog("Watchdog: restarting \(key) (attempt \(timestamps.count)/\(maxRestartsPerWindow) in window)")
+        return true
+    }
+
+    /// Restart only the agent-runtime SSH session (skip deploy/mount/kill)
+    private func restartRemoteAgentRuntime(config: RemoteAgentConfig) {
+        let agentRole = config.name == "johny" ? "marketing" : "dev"
+        let natsToken = envValue("NATS_TOKEN",
+            from: (try? String(contentsOfFile: "\(dataDir)/jarvis.env", encoding: .utf8)) ?? "")
+
+        let agentCmd = """
+            export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH && \
+            source ~/.nvm/nvm.sh 2>/dev/null && nvm use 22 2>/dev/null; \
+            cd ~/.jarvis && \
+            QNAP_NAS=$HOME/qnap/\(qnapNasSubdir) && \
+            LOCAL_NAS=$HOME/.jarvis/nas && \
+            if [ -d $QNAP_NAS ] && timeout 3 ls $QNAP_NAS/ >/dev/null 2>&1; then \
+              REMOTE_NAS=$QNAP_NAS; echo 'NAS: QNAP'; \
+            else \
+              mkdir -p $LOCAL_NAS/config $LOCAL_NAS/sessions $LOCAL_NAS/logs $LOCAL_NAS/workspace 2>/dev/null; \
+              REMOTE_NAS=$LOCAL_NAS; echo 'NAS: local fallback'; \
+            fi && \
+            set -a; [ -f .env ] && source .env; \
+            timeout 3 cat $REMOTE_NAS/config/api-keys.env >/dev/null 2>&1 && source $REMOTE_NAS/config/api-keys.env; \
+            set +a; \
+            export JARVIS_AGENT_ID=\(config.agentId) && \
+            export JARVIS_AGENT_ROLE=\(agentRole) && \
+            export NATS_URL=nats://192.168.1.33:4222 && \
+            export NATS_TOKEN=\(natsToken) && \
+            export JARVIS_NAS_MOUNT=$REMOTE_NAS && \
+            security unlock-keychain -p \(config.password) ~/Library/Keychains/login.keychain-db 2>/dev/null; \
+            exec ./node_modules/.bin/tsx packages/agent-runtime/src/cli.ts
+            """
+        launchPersistentSSH(name: "\(config.name)-agent", host: config.host,
+                            user: config.user, password: config.password, command: agentCmd)
+    }
+
+    /// Restart only the VNC proxy SSH session
+    private func restartRemoteVncProxy(config: RemoteAgentConfig) {
+        let vncCmd = """
+            export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH && \
+            cd ~/.jarvis && \
+            export VNC_USERNAME=\(config.user) && \
+            export VNC_PASSWORD='\(config.password)' && \
+            exec ./node_modules/.bin/tsx scripts/vnc-proxy.ts
+            """
+        launchPersistentSSH(name: "\(config.name)-vnc", host: config.host,
+                            user: config.user, password: config.password, command: vncCmd)
     }
 
     private func envValue(_ key: String, from envContent: String, fallback: String = "") -> String {
@@ -418,6 +569,7 @@ class ServiceManager {
             export ANTHROPIC_AUTH_MODE=claude-cli && \
             exec ./node_modules/.bin/tsx packages/agent-runtime/src/cli.ts
             """]
+        process.standardInput = FileHandle.nullDevice
 
         let logFile = "\(dataDir)/logs/orchestrator.log"
         try? "".write(toFile: logFile, atomically: true, encoding: .utf8)
@@ -440,6 +592,10 @@ class ServiceManager {
             NSLog("\(name): no host/user configured, skipping")
             return
         }
+
+        // Save config for watchdog restarts
+        remoteAgentConfigs[name] = RemoteAgentConfig(
+            name: name, host: host, user: user, password: password, agentId: agentId)
 
         NSLog("Starting remote agent: \(name) (\(user)@\(host))")
 
@@ -473,13 +629,15 @@ class ServiceManager {
             cd ~/.jarvis && \
             QNAP_NAS=$HOME/qnap/\(qnapNasSubdir) && \
             LOCAL_NAS=$HOME/.jarvis/nas && \
-            if [ -d $QNAP_NAS ] && ls $QNAP_NAS/ >/dev/null 2>&1; then \
+            if [ -d $QNAP_NAS ] && timeout 3 ls $QNAP_NAS/ >/dev/null 2>&1; then \
               REMOTE_NAS=$QNAP_NAS; echo 'NAS: QNAP'; \
             else \
               mkdir -p $LOCAL_NAS/config $LOCAL_NAS/sessions $LOCAL_NAS/logs $LOCAL_NAS/workspace 2>/dev/null; \
               REMOTE_NAS=$LOCAL_NAS; echo 'NAS: local fallback'; \
             fi && \
-            set -a; [ -f .env ] && source .env; [ -f $REMOTE_NAS/config/api-keys.env ] && source $REMOTE_NAS/config/api-keys.env; set +a; \
+            set -a; [ -f .env ] && source .env; \
+            timeout 3 cat $REMOTE_NAS/config/api-keys.env >/dev/null 2>&1 && source $REMOTE_NAS/config/api-keys.env; \
+            set +a; \
             export JARVIS_AGENT_ID=\(agentId) && \
             export JARVIS_AGENT_ROLE=\(agentRole) && \
             export NATS_URL=nats://192.168.1.33:4222 && \
@@ -658,17 +816,18 @@ class ServiceManager {
         // Output may contain "spawn ssh..." noise — extract just the IP
         for line in output.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("169.254.") {
+            // Match both static TB5 (10.0.1.x) and legacy link-local (169.254.x.x)
+            if trimmed.hasPrefix("10.0.1.") || trimmed.hasPrefix("169.254.") {
                 return trimmed
             }
         }
         return nil
     }
 
-    /// Fix bridge0 netmask on a remote machine from /32 to /16 via SSH
+    /// Fix bridge0 netmask on a remote machine to /24 via SSH
     private func fixRemoteThunderboltNetmask(host: String, user: String, password: String, tbIP: String) {
         runSSHCommand(host: host, user: user, password: password,
-            command: "echo '\(password)' | sudo -S ifconfig bridge0 \(tbIP) netmask 255.255.0.0 2>/dev/null; true")
+            command: "echo '\(password)' | sudo -S ifconfig bridge0 \(tbIP) netmask 255.255.255.0 2>/dev/null; true")
     }
 
     private func runSSHCommand(host: String, user: String, password: String, command: String) {
@@ -788,12 +947,12 @@ class ServiceManager {
         return result == 0
     }
 
-    /// Fix bridge0 netmask from /32 to /16 so Thunderbolt link-local IPs can communicate
+    /// Fix bridge0 netmask to /24 for static Thunderbolt 5 IPs
     private func fixThunderboltNetmask() {
         guard let firstIP = self.thunderboltIPs.first else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
-        process.arguments = ["bridge0", firstIP, "netmask", "255.255.0.0"]
+        process.arguments = ["bridge0", firstIP, "netmask", "255.255.255.0"]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do {
@@ -809,7 +968,7 @@ class ServiceManager {
         }
     }
 
-    /// Detect all Thunderbolt link-local IPs (bridge0, en6, en7, etc.)
+    /// Detect all Thunderbolt IPs (bridge0, en6, en7, etc.) — static 10.0.1.x or legacy 169.254.x.x
     private func detectThunderboltIPs() -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
@@ -827,7 +986,7 @@ class ServiceManager {
                     currentIface = String(line.prefix(while: { $0 != ":" }))
                 }
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.hasPrefix("inet ") && trimmed.contains("169.254.") {
+                if trimmed.hasPrefix("inet ") && (trimmed.contains("10.0.1.") || trimmed.contains("169.254.")) {
                     let parts = trimmed.components(separatedBy: " ")
                     if parts.count >= 2 {
                         let ip = parts[1]

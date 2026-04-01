@@ -59,7 +59,7 @@ export class HealthMonitor {
   private readonly startTime = Date.now();
   private checkInterval: ReturnType<typeof setInterval> | null = null;
   private readonly agentHeartbeats = new Map<string, number>();
-  private readonly agentStats = new Map<string, { completed: number; failed: number; startTime: number; memory?: number }>();
+  private readonly agentStats = new Map<string, { completed: number; failed: number; startTime: number; memory?: number; cpuLoad?: number; memoryPercent?: number }>();
   private costLog: CostEntry[] = [];
   private natsHealthy = false;
   private nasHealthy = false;
@@ -86,7 +86,7 @@ export class HealthMonitor {
   }
 
   /** Record agent heartbeat */
-  recordHeartbeat(agentId: string, data: { memoryUsage?: number; uptime?: number }): void {
+  recordHeartbeat(agentId: string, data: { memoryUsage?: number; uptime?: number; cpuLoad?: number; memoryPercent?: number }): void {
     this.agentHeartbeats.set(agentId, Date.now());
 
     if (!this.agentStats.has(agentId)) {
@@ -94,6 +94,25 @@ export class HealthMonitor {
     }
     const stats = this.agentStats.get(agentId)!;
     if (data.memoryUsage) stats.memory = data.memoryUsage;
+    if (data.cpuLoad !== undefined) stats.cpuLoad = data.cpuLoad;
+    if (data.memoryPercent !== undefined) stats.memoryPercent = data.memoryPercent;
+  }
+
+  /** Get agent load metrics for smart routing */
+  getAgentLoad(agentId: string): { cpuLoad: number; memoryPercent: number; isOverloaded: boolean } | null {
+    const stats = this.agentStats.get(agentId);
+    if (!stats) return null;
+    const lastHeartbeat = this.agentHeartbeats.get(agentId) ?? 0;
+    const isOnline = (Date.now() - lastHeartbeat) < AGENT_TIMEOUT_MS;
+    if (!isOnline) return null;
+
+    const cpuLoad = stats.cpuLoad ?? 0;
+    const memoryPercent = stats.memoryPercent ?? 0;
+    return {
+      cpuLoad,
+      memoryPercent,
+      isOverloaded: cpuLoad > 85 || memoryPercent > 90,
+    };
   }
 
   /** Record task completion */
@@ -224,12 +243,29 @@ export class HealthMonitor {
     };
   }
 
-  /** Check for timed-out agents */
+  private failoverCallback: ((agentId: string) => Promise<void>) | null = null;
+  private failoverTriggered = new Set<string>();
+
+  /** Register callback for agent failover (re-assign tasks when agent goes offline) */
+  onAgentOffline(callback: (agentId: string) => Promise<void>): void {
+    this.failoverCallback = callback;
+  }
+
+  /** Check for timed-out agents and trigger failover */
   private checkAgentTimeouts(): void {
     const now = Date.now();
     for (const [agentId, lastHeartbeat] of this.agentHeartbeats) {
       if (now - lastHeartbeat > AGENT_TIMEOUT_MS) {
-        log.warn(`Agent ${agentId} heartbeat timeout (last: ${Math.round((now - lastHeartbeat) / 1000)}s ago)`);
+        if (!this.failoverTriggered.has(agentId)) {
+          log.warn(`Agent ${agentId} heartbeat timeout — triggering failover`);
+          this.failoverTriggered.add(agentId);
+          this.failoverCallback?.(agentId).catch((err) => {
+            log.error(`Failover error for ${agentId}: ${(err as Error).message}`);
+          });
+        }
+      } else {
+        // Agent recovered — clear failover flag
+        this.failoverTriggered.delete(agentId);
       }
     }
   }

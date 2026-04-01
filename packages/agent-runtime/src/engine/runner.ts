@@ -30,11 +30,10 @@ const TOOL_TIMEOUT_MS = 120_000; // 2 minutes (was 5 — prevents long-hanging t
  *  Claude Opus 4.6: 32k, Sonnet 4.6: 64k output tokens max. */
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
 /** Approximate char budget for the full prompt (system + tools + messages).
- *  Claude CLI's `-p` mode pipes everything as a single string; keeping it
- *  well under the 200k-token context avoids "Prompt is too long" errors.
- *  ~150k chars ≈ ~40k tokens, leaving room for system prompt + tool defs.
- *  Bumped to 150k for Marketing Hub v4 (75k prompt + agent template + core). */
-const MAX_PROMPT_CHARS = 150_000;
+ *  Claude Opus 4.6 has 1M token context. System prompt (~137k chars ≈ 35k tokens)
+ *  + tool defs (~20k chars ≈ 5k tokens) + conversation needs room.
+ *  400k chars ≈ 100k tokens — plenty of room for Marketing Hub + Delamain + conversation. */
+const MAX_PROMPT_CHARS = 700_000;
 
 /**
  * Replace base64 image data in older tool results with a short text placeholder.
@@ -90,6 +89,8 @@ function stripOldImages(messages: Message[], keepRecentCount = 4): Message[] {
 const MAX_TOOL_USE_CHARS = 6_000;
 /** Max chars for a single tool_result content */
 const MAX_TOOL_RESULT_CHARS = 8_000;
+/** Max chars for a tool_result in older messages during pre-compaction */
+const MAX_OLD_TOOL_RESULT_CHARS = 1_500;
 /** Max tool_use/tool_result blocks to keep per message after truncation */
 const MAX_BLOCKS_PER_MESSAGE = 12;
 /** Max consecutive empty (zero-token / no-content) responses before giving up */
@@ -145,6 +146,59 @@ function compactWriteToolUse(messages: Message[], keepRecent = 4): Message[] {
               new_string: newStr && newStr.length > 500 ? `[${newStr.length} chars — trimmed]` : newStr,
             },
           };
+        }
+      }
+
+      return block;
+    });
+
+    return changed ? { ...msg, content: newContent as ContentBlock[] } : msg;
+  });
+}
+
+/**
+ * Compact large tool_result content in older messages.
+ *
+ * When the agent does web searches/fetches, each tool_result can contain 30-100KB of
+ * HTML/text. This bloats the session and triggers aggressive message dropping in
+ * trimMessagesToFit(), causing the agent to "forget" the conversation.
+ *
+ * This function truncates tool_result content in older messages to a reasonable size,
+ * preserving the actual conversation (user questions + assistant answers) while removing
+ * the raw tool output that the assistant already synthesized into its response.
+ */
+function compactOldToolResults(messages: Message[], keepRecent = 4): Message[] {
+  const threshold = messages.length - keepRecent;
+  return messages.map((msg, i) => {
+    if (i >= threshold) return msg; // keep recent messages intact
+    if (msg.role !== 'user' || !Array.isArray(msg.content)) return msg;
+
+    let changed = false;
+    const newContent = (msg.content as Array<Record<string, unknown>>).map((block) => {
+      if (block.type !== 'tool_result') return block;
+
+      const content = block.content;
+      if (typeof content === 'string' && content.length > MAX_OLD_TOOL_RESULT_CHARS) {
+        changed = true;
+        return {
+          ...block,
+          content: content.slice(0, MAX_OLD_TOOL_RESULT_CHARS) + '\n...[tool result truncated from ' + content.length + ' chars to save context]',
+        };
+      }
+
+      // Array content (may contain text blocks from web fetches)
+      if (Array.isArray(content)) {
+        let arrayChanged = false;
+        const truncated = (content as Array<Record<string, unknown>>).map((c) => {
+          if (c.type === 'text' && typeof c.text === 'string' && (c.text as string).length > MAX_OLD_TOOL_RESULT_CHARS) {
+            arrayChanged = true;
+            return { type: 'text', text: (c.text as string).slice(0, MAX_OLD_TOOL_RESULT_CHARS) + '\n...[truncated from ' + (c.text as string).length + ' chars]' };
+          }
+          return c;
+        });
+        if (arrayChanged) {
+          changed = true;
+          return { ...block, content: truncated };
         }
       }
 
@@ -274,21 +328,37 @@ function shrinkMessage(msg: Message, aggressive: boolean): Message {
  * Trim messages to stay within the prompt size budget.
  *
  * Strategy (applied in order until within budget):
- * 1. Drop middle message pairs (keep front 2 + tail 2)
- * 2. Shrink remaining messages by truncating large tool blocks
+ * 1. Shrink messages by truncating large tool blocks (preserves conversation flow)
+ * 2. Drop middle message pairs (keep front 2 + tail 4)
  * 3. Aggressive truncation — heavily shrink all remaining messages
+ * 4. Nuclear — keep only the first user message with a summary
+ *
+ * Key insight: Shrinking BEFORE dropping preserves the conversation flow.
+ * Tool results (web pages, search results) are already synthesized into
+ * assistant text responses, so compacting them loses little information
+ * while keeping the actual conversation intact.
  */
 function trimMessagesToFit(messages: Message[], systemPromptLen: number, toolDefsLen: number): Message[] {
   const estimate = (msgs: Message[]) => estimateMessagesSize(msgs, systemPromptLen, toolDefsLen);
 
   if (estimate(messages) <= MAX_PROMPT_CHARS) return messages;
 
-  // Phase 1: Drop middle message pairs (validate proper assistant+user pairing)
-  const keepFront = Math.min(2, messages.length);
-  const front = messages.slice(0, keepFront);
-  let tail = messages.slice(keepFront);
+  // Phase 1: Shrink individual messages first (truncate large tool blocks)
+  // This preserves ALL messages while reducing their size — much better than dropping them.
+  let trimmed = messages.map((m) => shrinkMessage(m, false));
+  if (estimate(trimmed) <= MAX_PROMPT_CHARS) {
+    log.info(`Context trimmed: ${messages.length} messages (phase 1: shrink blocks, ${estimate(trimmed)} chars)`);
+    return trimmed;
+  }
 
-  while (tail.length > 2 && estimate([...front, ...tail]) > MAX_PROMPT_CHARS) {
+  // Phase 2: Drop middle message pairs (keep front 2 + tail 4)
+  // Now that messages are already shrunk, we only drop pairs if still over budget.
+  const keepFront = Math.min(2, trimmed.length);
+  const keepTail = Math.min(4, trimmed.length - keepFront);
+  const front = trimmed.slice(0, keepFront);
+  let tail = trimmed.slice(keepFront);
+
+  while (tail.length > keepTail && estimate([...front, ...tail]) > MAX_PROMPT_CHARS) {
     // Drop in valid pairs: (assistant, user) or (user, assistant)
     if (tail[0]?.role === 'assistant' && tail[1]?.role === 'user') {
       tail = tail.slice(2);
@@ -300,18 +370,11 @@ function trimMessagesToFit(messages: Message[], systemPromptLen: number, toolDef
     }
   }
 
-  let trimmed = [...front, ...tail];
+  trimmed = [...front, ...tail];
   if (estimate(trimmed) <= MAX_PROMPT_CHARS) {
     if (trimmed.length < messages.length) {
-      log.info(`Context trimmed: ${messages.length} → ${trimmed.length} messages (phase 1: drop middle)`);
+      log.info(`Context trimmed: ${messages.length} → ${trimmed.length} messages (phase 2: drop middle, ${estimate(trimmed)} chars)`);
     }
-    return trimmed;
-  }
-
-  // Phase 2: Shrink individual messages (truncate large tool blocks)
-  trimmed = trimmed.map((m) => shrinkMessage(m, false));
-  if (estimate(trimmed) <= MAX_PROMPT_CHARS) {
-    log.info(`Context trimmed: ${messages.length} → ${trimmed.length} messages (phase 2: shrink blocks)`);
     return trimmed;
   }
 
@@ -319,7 +382,7 @@ function trimMessagesToFit(messages: Message[], systemPromptLen: number, toolDef
   trimmed = trimmed.map((m) => shrinkMessage(m, true));
   const finalSize = estimate(trimmed);
   if (finalSize <= MAX_PROMPT_CHARS) {
-    log.info(`Context trimmed: ${messages.length} → ${trimmed.length} messages (phase 3: aggressive, ${finalSize} chars)`);
+    log.info(`Context trimmed: ${trimmed.length} messages (phase 3: aggressive, ${finalSize} chars)`);
     return trimmed;
   }
 
@@ -755,10 +818,12 @@ export class AgentRunner {
       }
       this.taskQueue = this.taskQueue.filter(t => now - t.queuedAt <= AgentRunner.TASK_QUEUE_TTL_MS);
 
-      // Process next queued task if any
+      // Process next queued task — highest priority first
       if (this.taskQueue.length > 0) {
+        const priorityOrder: Record<string, number> = { critical: 0, high: 1, normal: 2, low: 3 };
+        this.taskQueue.sort((a, b) => (priorityOrder[a.priority] ?? 2) - (priorityOrder[b.priority] ?? 2));
         const next = this.taskQueue.shift()!;
-        log.info(`Dequeuing next task: ${next.taskId} (remaining: ${this.taskQueue.length})`);
+        log.info(`Dequeuing next task: ${next.taskId} [${next.priority}] (remaining: ${this.taskQueue.length})`);
         this.handleTask(next).catch((err) => {
           log.error(`Queued task handler error: ${(err as Error).message}`);
         });
@@ -1271,10 +1336,11 @@ This chat message arrived from WhatsApp. Your text response will be automaticall
       const toolDefs = this.getToolDefinitions();
       const toolDefsLen = JSON.stringify(toolDefs).length;
 
-      // Strip base64 images from older messages before trimming
+      // Pre-compact older messages to reduce context size before trimming.
+      // This preserves conversation flow by shrinking tool artifacts first.
       messages = stripOldImages(messages);
-      // Compact large write/edit tool_use blocks in older messages (e.g. 40KB HTML files)
       messages = compactWriteToolUse(messages);
+      messages = compactOldToolResults(messages);
       // Trim context if it's getting too large to prevent "Prompt is too long"
       messages = trimMessagesToFit(messages, systemPrompt.length, toolDefsLen);
 

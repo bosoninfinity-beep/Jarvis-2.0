@@ -48,13 +48,13 @@ export const NAS_DIRS = {
   marketing: 'marketing',
 } as const;
 
-/** Thunderbolt Bridge defaults (10 Gbps USB-C direct connect) */
+/** Thunderbolt 5 Bridge defaults (120 Gbps direct connect) */
 export const DEFAULT_TB_NATS_PORT = 4223;
-export const TB_IP_PREFIX = '169.254.100';
+export const TB_IP_PREFIX = '10.0.1';
 export const TB_MASTER_IP = `${TB_IP_PREFIX}.1`;
-export const TB_ALPHA_IP = `${TB_IP_PREFIX}.2`;
-export const TB_BETA_IP = `${TB_IP_PREFIX}.3`;
-export const TB_SUBNET_MASK = '255.255.0.0';
+export const TB_SMITH_IP = `${TB_IP_PREFIX}.2`;
+export const TB_JOHNY_IP = `${TB_IP_PREFIX}.3`;
+export const TB_SUBNET_MASK = '255.255.255.0';
 
 /** Default NATS connection URL */
 export const DEFAULT_NATS_URL = `nats://localhost:${DEFAULT_NATS_PORT}`;

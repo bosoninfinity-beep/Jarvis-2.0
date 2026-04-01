@@ -38,7 +38,9 @@ import { NasPaths } from './nas/paths.js';
 import { AuthManager } from './auth/auth.js';
 import { ProtocolHandler } from './protocol/handler.js';
 import { DependencyOrchestrator } from './orchestration/dependency-orchestrator.js';
+import { ParallelSplitter } from './orchestration/parallel-splitter.js';
 import { DailySummaryScheduler } from './monitoring/daily-summary.js';
+import { HealthMonitor } from './monitoring/health-monitor.js';
 import { maskSecret, isSecretKey, stripHtml, formatDuration } from './utils.js';
 import {
   getChannelConfig as _getChannelConfig,
@@ -93,6 +95,8 @@ export class GatewayServer {
   private nas: NasPaths;
   private auth: AuthManager;
   private orchestrator: DependencyOrchestrator;
+  private parallelSplitter: ParallelSplitter;
+  private healthMonitor: HealthMonitor;
   private dailySummary: DailySummaryScheduler | null = null;
   private healthInterval: ReturnType<typeof setInterval> | null = null;
   private activePingInterval: ReturnType<typeof setInterval> | null = null;
@@ -159,6 +163,20 @@ export class GatewayServer {
       maxTotalConcurrent: 4,
       maxDepth: 2,
     });
+    this.healthMonitor = new HealthMonitor(this.redis, config.nasMountPath ?? '');
+    this.parallelSplitter = new ParallelSplitter();
+    this.parallelSplitter.onAllCompleted(async (parentTaskId, results) => {
+      const aggregated = ParallelSplitter.aggregateResults(results, 'summary');
+      const status = aggregated.success ? 'completed' : 'failed';
+      await this.store.updateTask(parentTaskId, { status, metadata: { parallelResults: aggregated.output } });
+      this.protocol.broadcast(aggregated.success ? 'task.completed' : 'task.failed', {
+        taskId: parentTaskId,
+        success: aggregated.success,
+        output: aggregated.output,
+        parallel: true,
+      });
+      log.info(`Parallel task ${parentTaskId} aggregated: ${status}`);
+    });
 
     this.wa = new WhatsAppBridge({
       nats: this.nats,
@@ -189,18 +207,18 @@ export class GatewayServer {
     if (target === 'smith') {
       return {
         ip: tbEnabled
-          ? (process.env['VNC_ALPHA_HOST_THUNDERBOLT'] ?? process.env['SMITH_IP'] ?? '192.168.1.37')
-          : (process.env['SMITH_IP'] ?? '192.168.1.37'),
-        username: process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? 'agent_smith',
+          ? (process.env['VNC_SMITH_HOST_THUNDERBOLT'] ?? process.env['SMITH_IP_THUNDERBOLT'] ?? process.env['SMITH_IP'] ?? '192.168.1.231')
+          : (process.env['SMITH_IP'] ?? '192.168.1.231'),
+        username: process.env['SMITH_USER'] ?? 'agent_smith',
         label: 'Agent Smith (Dev)',
       };
     }
     if (target === 'johny') {
       return {
         ip: tbEnabled
-          ? (process.env['VNC_BETA_HOST_THUNDERBOLT'] ?? process.env['JOHNY_IP'] ?? '192.168.1.253')
-          : (process.env['JOHNY_IP'] ?? '192.168.1.253'),
-        username: process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? 'kamilpadula',
+          ? (process.env['VNC_JOHNY_HOST_THUNDERBOLT'] ?? process.env['JOHNY_IP_THUNDERBOLT'] ?? process.env['JOHNY_IP'] ?? '192.168.1.51')
+          : (process.env['JOHNY_IP'] ?? '192.168.1.51'),
+        username: process.env['JOHNY_USER'] ?? 'agent_johny',
         label: 'Agent Johny (Marketing)',
       };
     }
@@ -210,15 +228,15 @@ export class GatewayServer {
   private resolveSSHTarget(target: string): { ip: string; username: string; label: string } | null {
     if (target === 'smith') {
       return {
-        ip: process.env['SMITH_IP'] ?? '192.168.1.37',
-        username: process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? 'agent_smith',
+        ip: process.env['SMITH_IP'] ?? '192.168.1.231',
+        username: process.env['SMITH_USER'] ?? 'agent_smith',
         label: 'Agent Smith (Dev)',
       };
     }
     if (target === 'johny') {
       return {
-        ip: process.env['JOHNY_IP'] ?? '192.168.1.253',
-        username: process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? 'kamilpadula',
+        ip: process.env['JOHNY_IP'] ?? '192.168.1.51',
+        username: process.env['JOHNY_USER'] ?? 'agent_johny',
         label: 'Agent Johny (Marketing)',
       };
     }
@@ -254,7 +272,24 @@ export class GatewayServer {
     this.setupOrchestrator();
     this.orchestrator.start();
 
-    // Start health monitoring
+    // Start health monitoring with failover
+    this.healthMonitor.start();
+    this.healthMonitor.onAgentOffline(async (offlineAgentId) => {
+      // Find active tasks assigned to the offline agent and re-assign
+      const allTasks = await this.store.getAllTasks();
+      for (const task of allTasks) {
+        if (task.assignedAgent === offlineAgentId && (task.status === 'assigned' || task.status === 'in-progress')) {
+          log.warn(`Failover: re-assigning task ${task.id} from offline agent ${offlineAgentId}`);
+          await this.store.updateTask(task.id, { assignedAgent: null, status: 'pending' });
+          this.protocol.broadcast('task.failover', { taskId: task.id, fromAgent: offlineAgentId });
+          // Re-assign via smart routing
+          const refreshedTask = await this.store.getTask(task.id);
+          if (refreshedTask) {
+            await this.assignTask(refreshedTask);
+          }
+        }
+      }
+    });
     this.startHealthMonitoring();
 
     // Start active agent ping (every 5 min)
@@ -536,26 +571,27 @@ export class GatewayServer {
       res.json({ tasks });
     });
 
-    // ── VNC: embedded viewer — per-agent WebSocket proxy via Thunderbolt ──
+    // ── VNC: embedded viewer — direct WebSocket to vnc-proxy on each agent ──
+    // vnc-proxy.ts runs on each agent (port 6080) and handles ARD auth (type 30)
+    // Dashboard connects directly to the vnc-proxy WebSocket, bypassing gateway TCP proxy
+    // Use LAN IPs (not Thunderbolt) for VNC — WebView may have issues with link-local addresses
     this.app.get('/api/vnc', (req, res) => {
-      const smith = this.resolveVncTarget('smith')!;
-      const johny = this.resolveVncTarget('johny')!;
-      // Use gateway's built-in WS-to-TCP proxy (/ws/vnc/{target}) instead of direct agent websockify
-      const host = req.headers.host ?? `localhost:${this.port}`;
-      const proto = req.secure ? 'wss' : 'ws';
+      const smithHost = process.env['SMITH_IP'] ?? '192.168.1.231';
+      const johnyHost = process.env['JOHNY_IP'] ?? '192.168.1.51';
+      const vncProxyPort = 6080;
       res.json({
         endpoints: {
           smith: {
-            label: smith.label,
-            wsUrl: `${proto}://${host}/ws/vnc/smith`,
-            username: process.env['VNC_ALPHA_USERNAME'] ?? process.env['SMITH_USER'] ?? 'agent_smith',
-            password: process.env['VNC_ALPHA_PASSWORD'] ?? process.env['VNC_SMITH_PASSWORD'] ?? process.env['SMITH_PASS'] ?? '',
+            label: `Smith (${smithHost})`,
+            wsUrl: `ws://${smithHost}:${vncProxyPort}`,
+            username: process.env['VNC_SMITH_USERNAME'] ?? process.env['SMITH_USER'] ?? 'agent_smith',
+            password: process.env['VNC_SMITH_PASSWORD'] ?? process.env['SMITH_PASS'] ?? '',
           },
           johny: {
-            label: johny.label,
-            wsUrl: `${proto}://${host}/ws/vnc/johny`,
-            username: process.env['VNC_BETA_USERNAME'] ?? process.env['JOHNY_USER'] ?? 'kamilpadula',
-            password: process.env['VNC_BETA_PASSWORD'] ?? process.env['VNC_JOHNY_PASSWORD'] ?? process.env['JOHNY_PASS'] ?? '',
+            label: `Johny (${johnyHost})`,
+            wsUrl: `ws://${johnyHost}:${vncProxyPort}`,
+            username: process.env['VNC_JOHNY_USERNAME'] ?? process.env['JOHNY_USER'] ?? 'agent_johny',
+            password: process.env['VNC_JOHNY_PASSWORD'] ?? process.env['JOHNY_PASS'] ?? '',
           },
         },
       });
@@ -660,8 +696,8 @@ export class GatewayServer {
               },
             },
             agents: {
-              smith: { ip: process.env['SMITH_IP'] ?? process.env['ALPHA_IP'] ?? '', user: process.env['SMITH_USER'] ?? process.env['ALPHA_USER'] ?? '', role: 'dev', vnc_port: 6080 },
-              johny: { ip: process.env['JOHNY_IP'] ?? process.env['BETA_IP'] ?? '', user: process.env['JOHNY_USER'] ?? process.env['BETA_USER'] ?? '', role: 'marketing', vnc_port: 6080 },
+              smith: { ip: process.env['SMITH_IP'] ?? '', user: process.env['SMITH_USER'] ?? '', role: 'dev', vnc_port: 6080 },
+              johny: { ip: process.env['JOHNY_IP'] ?? '', user: process.env['JOHNY_USER'] ?? '', role: 'marketing', vnc_port: 6080 },
             },
             nas: {
               ip: process.env['NAS_IP'] ?? '',
@@ -671,8 +707,8 @@ export class GatewayServer {
             thunderbolt: {
               enabled: process.env['THUNDERBOLT_ENABLED'] === 'true',
               master_ip: process.env['MASTER_IP_THUNDERBOLT'] ?? '',
-              smith_ip: process.env['SMITH_IP_THUNDERBOLT'] ?? process.env['ALPHA_IP_THUNDERBOLT'] ?? '',
-              johny_ip: process.env['JOHNY_IP_THUNDERBOLT'] ?? process.env['BETA_IP_THUNDERBOLT'] ?? '',
+              smith_ip: process.env['SMITH_IP_THUNDERBOLT'] ?? '',
+              johny_ip: process.env['JOHNY_IP_THUNDERBOLT'] ?? '',
               nats_url: process.env['NATS_URL_THUNDERBOLT'] ?? '',
             },
           });
@@ -708,9 +744,9 @@ export class GatewayServer {
         } else if (section === 'thunderbolt') {
           data.thunderbolt = {
             enabled: body.enabled ?? false,
-            master_ip: body.masterIp ?? '169.254.100.1',
-            smith_ip: body.smithIp ?? '169.254.100.2',
-            johny_ip: body.johnyIp ?? '169.254.100.3',
+            master_ip: body.masterIp ?? '10.0.1.1',
+            smith_ip: body.smithIp ?? '10.0.1.2',
+            johny_ip: body.johnyIp ?? '10.0.1.3',
             nats_port: body.natsPort ?? 4223,
           };
         }
@@ -760,12 +796,11 @@ export class GatewayServer {
       return;
     }
 
-    // VNC env aliases: VNC_ALPHA_* = smith, VNC_BETA_* = johny, SMITH_IP/JOHNY_IP = LAN fallbacks
     const tbEnabled = process.env['THUNDERBOLT_ENABLED'] === 'true';
-    const smithTb = (tbEnabled && process.env['VNC_ALPHA_HOST_THUNDERBOLT']) ? process.env['VNC_ALPHA_HOST_THUNDERBOLT'] : null;
-    const johnyTb = (tbEnabled && process.env['VNC_BETA_HOST_THUNDERBOLT']) ? process.env['VNC_BETA_HOST_THUNDERBOLT'] : null;
-    const smithLan = process.env['VNC_ALPHA_HOST'] ?? process.env['SMITH_IP'] ?? '192.168.1.37';
-    const johnyLan = process.env['VNC_BETA_HOST'] ?? process.env['JOHNY_IP'] ?? '192.168.1.253';
+    const smithTb = (tbEnabled && process.env['VNC_SMITH_HOST_THUNDERBOLT']) ? process.env['VNC_SMITH_HOST_THUNDERBOLT'] : null;
+    const johnyTb = (tbEnabled && process.env['VNC_JOHNY_HOST_THUNDERBOLT']) ? process.env['VNC_JOHNY_HOST_THUNDERBOLT'] : null;
+    const smithLan = process.env['VNC_SMITH_HOST'] ?? process.env['SMITH_IP'] ?? '192.168.1.231';
+    const johnyLan = process.env['VNC_JOHNY_HOST'] ?? process.env['JOHNY_IP'] ?? '192.168.1.51';
     const tbHost = target === 'smith' ? smithTb : johnyTb;
     const lanHost = target === 'smith' ? smithLan : johnyLan;
     const vncPort = 5900;
@@ -929,12 +964,54 @@ export class GatewayServer {
       task.status = task.status || 'pending';
       task.createdAt = Date.now();
       task.updatedAt = Date.now();
+
+      // Check if task can be parallelized across multiple agents
+      const meta = task.metadata as Record<string, unknown> | undefined;
+      if (this.parallelSplitter.isParallelizable(task.title, task.description ?? '', meta)) {
+        const agents = await this.store.getAllAgentStates();
+        const available = agents
+          .filter(a => a.status !== 'offline' && a.identity.agentId !== 'jarvis')
+          .map(a => ({ id: a.identity.agentId as AgentId, capabilities: (a.identity as Record<string, unknown>).capabilities as string[] ?? [] }));
+
+        const plan = this.parallelSplitter.split(task.id, task.title, task.description ?? '', task.priority ?? 'normal', available, meta);
+        if (plan) {
+          // Store parent task
+          task.subtaskIds = plan.subtasks.map(s => s.id);
+          task.status = 'in-progress';
+          await this.store.createTask(task);
+          this.protocol.broadcast('task.created', { ...task, parallel: true, subtaskCount: plan.subtasks.length });
+
+          // Track parallel execution
+          this.parallelSplitter.track(plan);
+
+          // Create and dispatch each subtask
+          for (const sub of plan.subtasks) {
+            const subTask: TaskDefinition = {
+              id: sub.id,
+              title: sub.title,
+              description: sub.description,
+              priority: sub.priority,
+              status: 'pending',
+              requiredCapabilities: sub.requiredCapabilities as TaskDefinition['requiredCapabilities'],
+              assignedAgent: null,
+              parentTaskId: task.id,
+              subtaskIds: [],
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              metadata: {},
+            };
+            await this.store.createTask(subTask);
+            await this.assignTask(subTask);
+          }
+
+          log.info(`Parallel task ${task.id}: ${plan.subtasks.length} subtasks dispatched (${plan.strategy})`);
+          return { taskId: task.id, parallel: true, subtasks: plan.subtasks.map(s => s.id) };
+        }
+      }
+
+      // Standard single-agent assignment
       await this.store.createTask(task);
-
-      // Broadcast to dashboard
       this.protocol.broadcast('task.created', task);
-
-      // Assign to appropriate agent based on capabilities
       await this.assignTask(task);
 
       return { taskId: task.id };
@@ -1046,18 +1123,18 @@ export class GatewayServer {
 
     this.protocol.registerMethod('vnc.info', async () => {
       const tbEnabled = process.env['THUNDERBOLT_ENABLED'] === 'true';
-      const sTb = process.env['VNC_SMITH_HOST_THUNDERBOLT'] ?? process.env['VNC_ALPHA_HOST_THUNDERBOLT'];
-      const jTb = process.env['VNC_JOHNY_HOST_THUNDERBOLT'] ?? process.env['VNC_BETA_HOST_THUNDERBOLT'];
+      const sTb = process.env['VNC_SMITH_HOST_THUNDERBOLT'];
+      const jTb = process.env['VNC_JOHNY_HOST_THUNDERBOLT'];
       return {
         smith: {
-          host: (tbEnabled && sTb) ? sTb : (process.env['VNC_SMITH_HOST'] ?? process.env['VNC_ALPHA_HOST'] ?? '192.168.1.37'),
-          port: Number(process.env['VNC_SMITH_PORT'] ?? process.env['VNC_ALPHA_PORT'] ?? 6080),
+          host: (tbEnabled && sTb) ? sTb : (process.env['VNC_SMITH_HOST'] ?? process.env['SMITH_IP'] ?? '192.168.1.231'),
+          port: Number(process.env['VNC_SMITH_PORT'] ?? 6080),
           label: 'Agent Smith (Dev)',
           thunderbolt: tbEnabled && !!sTb,
         },
         johny: {
-          host: (tbEnabled && jTb) ? jTb : (process.env['VNC_JOHNY_HOST'] ?? process.env['VNC_BETA_HOST'] ?? '192.168.1.253'),
-          port: Number(process.env['VNC_JOHNY_PORT'] ?? process.env['VNC_BETA_PORT'] ?? 6080),
+          host: (tbEnabled && jTb) ? jTb : (process.env['VNC_JOHNY_HOST'] ?? process.env['JOHNY_IP'] ?? '192.168.1.51'),
+          port: Number(process.env['VNC_JOHNY_PORT'] ?? 6080),
           label: 'Agent Johny (Marketing)',
           thunderbolt: tbEnabled && !!jTb,
         },
@@ -1256,6 +1333,16 @@ export class GatewayServer {
 
     this.protocol.registerMethod('orchestrator.ready', async () => {
       return this.orchestrator.getReadyTasks();
+    });
+
+    this.protocol.registerMethod('orchestrator.parallel', async () => {
+      return this.parallelSplitter.getActiveTrackers().map(t => ({
+        parentTaskId: t.parentTaskId,
+        completed: t.completedCount,
+        total: t.totalCount,
+        elapsed: Date.now() - t.startedAt,
+        subtaskIds: t.subtaskIds,
+      }));
     });
 
     // --- Integrations ---
@@ -3554,11 +3641,17 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
       this.agentStates.set(state.identity.agentId, state);
     });
 
-    this.nats.subscribe('jarvis.agent.*.heartbeat', (_data, msg) => {
+    this.nats.subscribe('jarvis.agent.*.heartbeat', (data, msg) => {
       const agentId = msg.subject.split('.')[2];
       knownAgents.add(agentId);
       void this.store.updateHeartbeat(agentId);
-      // Don't broadcast heartbeats to dashboard — agent.status already covers state changes
+      // Feed heartbeat data into health monitor for load-aware routing
+      const hb = data as Record<string, unknown>;
+      this.healthMonitor.recordHeartbeat(agentId, {
+        memoryUsage: typeof hb.memoryUsage === 'number' ? hb.memoryUsage : undefined,
+        cpuLoad: typeof hb.cpuLoad === 'number' ? hb.cpuLoad : undefined,
+        memoryPercent: typeof hb.memoryPercent === 'number' ? hb.memoryPercent : undefined,
+      });
     });
 
     this.nats.subscribe('jarvis.agent.*.result', (data, msg) => {
@@ -3610,6 +3703,13 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
         } else {
           this.orchestrator.failTask(result.taskId, (result.output as string) ?? 'Task failed');
         }
+
+        // Track parallel subtask results
+        this.parallelSplitter.recordResult(
+          result.taskId,
+          result.success !== false,
+          (result.output as string) ?? '',
+        );
       }
     });
 
@@ -3742,6 +3842,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
     totalTokens: number;
     inputTokens: number;
     outputTokens: number;
+    model: string;
   }> {
     const results: Array<{
       id: string;
@@ -3752,6 +3853,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
       totalTokens: number;
       inputTokens: number;
       outputTokens: number;
+      model: string;
     }> = [];
 
     for (const agentId of knownAgents) {
@@ -3772,6 +3874,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
             let outputTokens = 0;
             let createdAt = 0;
             let taskId: string | undefined;
+            let model = 'unknown';
 
             for (const line of lines) {
               try {
@@ -3781,6 +3884,8 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
                   totalTokens += entry.data?.totalTokens ?? 0;
                   inputTokens += entry.data?.inputTokens ?? 0;
                   outputTokens += entry.data?.outputTokens ?? 0;
+                  if (entry.data?.model) model = entry.data.model;
+                  else if (entry.model) model = entry.model;
                 }
                 if (entry.timestamp && (!createdAt || entry.timestamp < createdAt)) {
                   createdAt = entry.timestamp;
@@ -3802,6 +3907,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
               totalTokens,
               inputTokens,
               outputTokens,
+              model,
             });
           } catch { /* skip unreadable files */ }
         }
@@ -3873,6 +3979,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
   } {
     const sessions = this.listSessions();
     const byAgent: Record<string, { totalTokens: number; inputTokens: number; outputTokens: number; sessions: number }> = {};
+    const byModel: Record<string, { totalTokens: number; calls: number }> = {};
 
     let totalTokens = 0;
     let totalInputTokens = 0;
@@ -3890,10 +3997,28 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
       byAgent[s.agentId].inputTokens += s.inputTokens;
       byAgent[s.agentId].outputTokens += s.outputTokens;
       byAgent[s.agentId].sessions++;
+
+      const modelKey = s.model || 'unknown';
+      if (!byModel[modelKey]) {
+        byModel[modelKey] = { totalTokens: 0, calls: 0 };
+      }
+      byModel[modelKey].totalTokens += s.totalTokens;
+      byModel[modelKey].calls++;
     }
 
-    // Estimate cost (Claude Sonnet pricing: $3/M input, $15/M output)
-    const estimatedCost = (totalInputTokens / 1_000_000) * 3 + (totalOutputTokens / 1_000_000) * 15;
+    // Estimate cost per model
+    const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+      'claude-opus-4-6':   { input: 15, output: 75 },
+      'claude-sonnet-4-6': { input: 3, output: 15 },
+      'claude-haiku-4-5':  { input: 0.8, output: 4 },
+    };
+    const defaultPricing = { input: 3, output: 15 };
+
+    let estimatedCost = 0;
+    for (const s of sessions) {
+      const pricing = MODEL_PRICING[s.model] ?? defaultPricing;
+      estimatedCost += (s.inputTokens / 1_000_000) * pricing.input + (s.outputTokens / 1_000_000) * pricing.output;
+    }
 
     return {
       totalTokens,
@@ -3901,7 +4026,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
       totalOutputTokens,
       totalSessions: sessions.length,
       byAgent,
-      byModel: {}, // TODO: track per-model usage
+      byModel,
       estimatedCost,
     };
   }
@@ -3922,7 +4047,7 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
       totalTokens: s.totalTokens,
       inputTokens: s.inputTokens,
       outputTokens: s.outputTokens,
-      model: 'claude-sonnet-4-6', // TODO: read from session
+      model: s.model,
     }));
   }
 
@@ -4509,40 +4634,66 @@ INSERT OR REPLACE INTO _schema_version (version) VALUES (4);
   // --- Task Assignment ---
 
   private async assignTask(task: TaskDefinition): Promise<void> {
-    // Simple assignment: match required capabilities to agent
+    // Smart assignment: capability match + load-aware routing
     const agents = await this.store.getAllAgentStates();
 
-    for (const agent of agents) {
-      if (agent.status !== 'idle') continue;
+    // Build scored candidate list
+    type Candidate = { agentId: string; score: number };
+    const candidates: Candidate[] = [];
 
-      const caps = await this.store.getCapabilities(agent.identity.agentId);
+    for (const agent of agents) {
+      const agentId = agent.identity.agentId;
+      if (agentId === 'jarvis') continue; // orchestrator doesn't run tasks
+
+      const caps = await this.store.getCapabilities(agentId);
       if (!caps) continue;
 
       const hasAllCapabilities = task.requiredCapabilities.every(
         (cap) => caps.capabilities.includes(cap as never)
       );
+      if (!hasAllCapabilities) continue;
 
-      if (hasAllCapabilities) {
-        await this.store.updateTask(task.id, { assignedAgent: agent.identity.agentId, status: 'assigned' });
-        // Send as TaskAssignment format (taskId, not id) expected by agent-runtime
-        const taskAssignment = {
-          taskId: task.id,
-          title: task.title,
-          description: task.description ?? task.title,
-          priority: String(task.priority ?? 'normal'),
-        };
-        await this.nats.publish(NatsSubjects.agentTask(agent.identity.agentId), taskAssignment);
-        this.protocol.broadcast('task.assigned', {
-          taskId: task.id,
-          agentId: agent.identity.agentId,
-        });
-        log.info(`Task ${task.id} assigned to ${agent.identity.agentId}`);
-        return;
+      // Score: lower is better
+      let score = 0;
+      const load = this.healthMonitor.getAgentLoad(agentId);
+      if (load) {
+        if (load.isOverloaded) score += 1000; // heavy penalty
+        score += load.cpuLoad + load.memoryPercent; // 0-200 range
+      } else {
+        score += 100; // unknown load = medium penalty
       }
+
+      // Prefer idle agents
+      if (agent.status === 'busy') score += 200;
+      else if (agent.status === 'offline') score += 5000;
+
+      candidates.push({ agentId, score });
+    }
+
+    // Sort by score (lowest = best)
+    candidates.sort((a, b) => a.score - b.score);
+
+    const best = candidates[0];
+    if (best && best.score < 5000) { // don't assign to offline agents
+      await this.store.updateTask(task.id, { assignedAgent: best.agentId, status: 'assigned' });
+      const taskAssignment = {
+        taskId: task.id,
+        title: task.title,
+        description: task.description ?? task.title,
+        priority: String(task.priority ?? 'normal'),
+      };
+      await this.nats.publish(NatsSubjects.agentTask(best.agentId), taskAssignment);
+      this.protocol.broadcast('task.assigned', {
+        taskId: task.id,
+        agentId: best.agentId,
+      });
+      log.info(`Task ${task.id} assigned to ${best.agentId} (score: ${best.score})`);
+      return;
     }
 
     log.warn(`No available agent for task ${task.id}`, {
       required: task.requiredCapabilities,
+      candidates: candidates.map(c => `${c.agentId}:${c.score}`),
     });
   }
 

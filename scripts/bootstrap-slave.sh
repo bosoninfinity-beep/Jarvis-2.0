@@ -42,27 +42,33 @@ MASTER_IP=""
 MY_WIFI_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")
 MY_USB_IP=""
 
-# Check all interfaces for USB-C link-local
-for iface in en5 en6 en7 en8 en9 en10 en11 en12; do
+# Check all interfaces for Thunderbolt (static 10.0.1.x or legacy link-local 169.254.x.x)
+for iface in bridge0 en5 en6 en7 en8 en9 en10 en11 en12; do
   ip=$(ipconfig getifaddr "$iface" 2>/dev/null || true)
-  if [[ "$ip" == 169.254.* ]]; then
+  if [[ "$ip" == 10.0.1.* || "$ip" == 169.254.* ]]; then
     MY_USB_IP="$ip"
-    ok "USB-C interface: $iface ($ip)"
+    ok "Thunderbolt interface: $iface ($ip)"
     break
   fi
 done
 
-# Try to find Master on USB-C first (faster)
+# Try to find Master on Thunderbolt first (faster)
 if [[ -n "$MY_USB_IP" ]]; then
-  echo -e "  ${DIM}Szukam Master na USB-C...${RESET}"
-  # Scan link-local subnet for NATS (port 4222) or HTTP (port 9876)
-  for host in $(arp -a 2>/dev/null | grep -oE '169\.254\.[0-9]+\.[0-9]+'); do
-    if curl -s --connect-timeout 2 "http://${host}:${GATEWAY_PORT}/health" 2>/dev/null | grep -q '"status":"ok"'; then
-      MASTER_IP="$host"
-      ok "Master znaleziony na USB-C: $MASTER_IP"
-      break
-    fi
-  done
+  echo -e "  ${DIM}Szukam Master na Thunderbolt...${RESET}"
+  # Try static TB5 master IP first
+  if curl -s --connect-timeout 2 "http://10.0.1.1:${GATEWAY_PORT}/health" 2>/dev/null | grep -q '"status":"ok"'; then
+    MASTER_IP="10.0.1.1"
+    ok "Master znaleziony na Thunderbolt 5: $MASTER_IP"
+  else
+    # Fallback: scan ARP table for legacy link-local
+    for host in $(arp -a 2>/dev/null | grep -oE '169\.254\.[0-9]+\.[0-9]+'); do
+      if curl -s --connect-timeout 2 "http://${host}:${GATEWAY_PORT}/health" 2>/dev/null | grep -q '"status":"ok"'; then
+        MASTER_IP="$host"
+        ok "Master znaleziony na Thunderbolt (legacy): $MASTER_IP"
+        break
+      fi
+    done
+  fi
 fi
 
 # Fallback: find Master on WiFi
@@ -92,18 +98,25 @@ if [[ -z "$MASTER_IP" ]]; then
   exit 1
 fi
 
-# Find Master USB-C IP (for fast NATS)
+# Find Master Thunderbolt IP (for fast NATS)
 MASTER_USB_IP=""
 if [[ -n "$MY_USB_IP" ]]; then
-  for host in $(arp -a 2>/dev/null | grep -oE '169\.254\.[0-9]+\.[0-9]+'); do
-    if [[ "$host" != "$MY_USB_IP" ]]; then
-      if nc -z -w 1 "$host" 4222 2>/dev/null; then
-        MASTER_USB_IP="$host"
-        ok "Master USB-C NATS: $host:4222"
-        break
+  # Try static TB5 master first
+  if nc -z -w 1 "10.0.1.1" 4222 2>/dev/null; then
+    MASTER_USB_IP="10.0.1.1"
+    ok "Master Thunderbolt NATS: 10.0.1.1:4222"
+  else
+    # Fallback: scan ARP for legacy link-local
+    for host in $(arp -a 2>/dev/null | grep -oE '169\.254\.[0-9]+\.[0-9]+'); do
+      if [[ "$host" != "$MY_USB_IP" ]]; then
+        if nc -z -w 1 "$host" 4222 2>/dev/null; then
+          MASTER_USB_IP="$host"
+          ok "Master USB-C NATS: $host:4222"
+          break
+        fi
       fi
-    fi
-  done
+    done
+  fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════

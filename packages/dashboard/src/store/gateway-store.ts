@@ -334,20 +334,8 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
       }));
     }));
 
-    // Map chat.stream deltas into console lines
-    unsubs.push(gateway.on('chat.stream', (payload) => {
-      const d = payload as { from?: string; phase?: string; text?: string; toolName?: string; timestamp?: number };
-      const agentId = d.from ?? 'jarvis';
-      let line = '';
-      if (d.phase === 'thinking' && d.text) line = d.text;
-      else if (d.phase === 'text' && d.text) line = d.text;
-      else if (d.phase === 'tool_start') line = `▶ ${d.toolName ?? 'tool'}`;
-      else if (d.phase === 'done') line = '✓ done';
-      if (!line) return;
-      set((prev) => ({
-        consoleLines: [...prev.consoleLines.slice(-200), { agentId, line, timestamp: d.timestamp ?? Date.now() }],
-      }));
-    }));
+    // Note: chat.stream is handled directly by ConsoleViewer (with in-place updates).
+    // No need to duplicate into consoleLines here.
 
     // --- OTA Update events ---
     unsubs.push(gateway.on('system.update.available', (payload) => {

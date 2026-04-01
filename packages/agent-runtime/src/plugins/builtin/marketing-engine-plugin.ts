@@ -138,6 +138,9 @@ CREATE TABLE IF NOT EXISTS content_library (
   published_date TEXT,
   performance_notes TEXT,
   tags TEXT,
+  error_message TEXT,
+  platform_post_id TEXT,
+  platform_post_url TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

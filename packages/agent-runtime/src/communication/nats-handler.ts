@@ -1,5 +1,5 @@
 import { connect, StringCodec, type NatsConnection, type Subscription } from 'nats';
-import { networkInterfaces } from 'node:os';
+import { networkInterfaces, totalmem, freemem } from 'node:os';
 import { connect as tcpConnect } from 'node:net';
 import dns from 'node:dns';
 import { createLogger, NatsSubjects, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, type AgentId, type AgentState, type AgentRole, type ChatStreamDelta } from '@jarvis/shared';
@@ -317,6 +317,23 @@ export class NatsHandler {
 
   // ─── Heartbeat ────────────────────────────────────
 
+  private lastCpuUsage: { user: number; system: number } = { user: 0, system: 0 };
+
+  private getCpuLoad(): number {
+    const usage = process.cpuUsage(/* since last call */);
+    const totalDelta = (usage.user - this.lastCpuUsage.user) + (usage.system - this.lastCpuUsage.system);
+    this.lastCpuUsage = { user: usage.user, system: usage.system };
+    // Convert microseconds over heartbeat interval to percentage (rough estimate)
+    const intervalUs = HEARTBEAT_INTERVAL * 1000;
+    return Math.min(100, Math.round((totalDelta / intervalUs) * 100));
+  }
+
+  private getMemoryPercent(): number {
+    const total = totalmem();
+    const free = freemem();
+    return Math.round(((total - free) / total) * 100);
+  }
+
   private startHeartbeat(): void {
     this.heartbeatInterval = setInterval(async () => {
       try {
@@ -324,6 +341,8 @@ export class NatsHandler {
           agentId: this.config.agentId,
           timestamp: Date.now(),
           memoryUsage: process.memoryUsage().heapUsed,
+          cpuLoad: this.getCpuLoad(),
+          memoryPercent: this.getMemoryPercent(),
           uptime: process.uptime(),
           status: this.currentStatus,
           peers: Array.from(this.peers.keys()),

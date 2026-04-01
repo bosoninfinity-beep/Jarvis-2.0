@@ -24,6 +24,9 @@ const LABELS: Record<string, string> = {
 
 let lineId = 0;
 
+/** Tracks which agents are currently streaming (to update in-place instead of adding new lines) */
+const streamingAgents = new Set<string>();
+
 export function ConsoleViewer() {
   const [lines, setLines] = useState<ConsoleLine[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -39,23 +42,58 @@ export function ConsoleViewer() {
       setLines((prev) => [...prev.slice(-(maxLines - 1)), { id: ++lineId, agent, text, type }]);
     };
 
+    /** Update the last stream line for this agent in-place (live typing effect) */
+    const updateStream = (agent: string, text: string) => {
+      if (!text.trim()) return;
+      setLines((prev) => {
+        // Find the last 'stream' line for this agent to update in-place
+        const lastIdx = prev.findLastIndex((l) => l.agent === agent && l.type === 'stream');
+        if (lastIdx >= 0 && streamingAgents.has(agent)) {
+          const updated = [...prev];
+          updated[lastIdx] = { ...updated[lastIdx], text };
+          return updated;
+        }
+        // No existing stream line — add a new one
+        streamingAgents.add(agent);
+        return [...prev.slice(-(maxLines - 1)), { id: ++lineId, agent, text, type: 'stream' }];
+      });
+    };
+
     const unsubs: Array<() => void> = [];
 
     // Chat stream — thinking, text, tool calls, done
     unsubs.push(gateway.on('chat.stream', (p: unknown) => {
       const d = p as { from?: string; phase?: string; text?: string; toolName?: string };
       const agent = d.from ?? 'jarvis';
-      if (d.phase === 'thinking' && d.text) add(agent, d.text, 'stream');
-      else if (d.phase === 'text' && d.text) add(agent, d.text, 'stream');
-      else if (d.phase === 'tool_start') add(agent, `▶ ${d.toolName ?? 'tool'}`, 'tool');
-      else if (d.phase === 'done') add(agent, '✓ done', 'status');
+      if (d.phase === 'text' && d.text) {
+        // Update in-place — accumulated text replaces previous stream line
+        updateStream(agent, d.text);
+      } else if (d.phase === 'thinking' && d.text) {
+        updateStream(agent, d.text);
+      } else if (d.phase === 'tool_start') {
+        add(agent, `▶ ${d.toolName ?? 'tool'}`, 'tool');
+      } else if (d.phase === 'done') {
+        streamingAgents.delete(agent);
+        add(agent, '✓ done', 'status');
+      }
     }));
 
-    // Chat messages
+    // Chat messages — final response (skip if stream already showed it)
     unsubs.push(gateway.on('chat.message', (p: unknown) => {
       const d = p as { from?: string; content?: string };
       if (d.from && d.from !== 'user' && d.content) {
-        add(d.from, d.content.slice(0, 300), 'stream');
+        // Replace the last stream line with the final clean text
+        setLines((prev) => {
+          const lastStreamIdx = prev.findLastIndex((l) => l.agent === d.from && l.type === 'stream');
+          if (lastStreamIdx >= 0) {
+            // Stream line exists — update it with the final content
+            const updated = [...prev];
+            updated[lastStreamIdx] = { ...updated[lastStreamIdx], text: d.content!.slice(0, 500) };
+            return updated;
+          }
+          // No stream line — add as new (agent didn't stream, e.g. queued response)
+          return [...prev.slice(-(maxLines - 1)), { id: ++lineId, agent: d.from!, text: d.content!.slice(0, 500), type: 'stream' }];
+        });
       }
     }));
 
